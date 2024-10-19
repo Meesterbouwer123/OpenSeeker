@@ -10,4 +10,12 @@ A ServerSeeker clone, but now open-source
 5. Do the [SLP](https://wiki.vg/Server_List_Ping). If it doesn't succeed, use the legacy ping. If that doesn't succeed, try to join in offline mode. This should be fast, so an event loop like [libxev](https://github.com/mitchellh/libxev) or [libuv](https://libuv.org/).
 6. Store the information: at least timestamp, IP, port, banner, players, offline mode. Wasn't there also some kind of BungeeCord exploit? This should probably be in some kind of database, like [SQLite](https://sqlite.org) or [PostgreSQL](https://postgresql.org).
 ### Proposal: Meesterbouwer123
-Let me overengineer this a little bit, I first need to see if the webhook works
+The main scanning operation consists of 3 parts: *discovery*, *pinger* and *database*.
+
+The *discovery* is a [masscan](https://github.com/robertdavidgraham/masscan) wrapper and will search for open ports in specified IP ranges (often 0.0.0.0/0 on port 25565, but we could also add adaptive scanning in here).
+
+The *pinger* will take the outputs from the discovery, and perform a [Server List Ping](https://wiki.vg/Server_List_Ping) on them. we could also add other features such as cracked/bungeecord checking.
+
+The *database* will store all the results from the pinger, and will give the pinger also a list of old servers back to see if the data is still accurate. It will also give the discovery interesting ranges to scan, as a form of adaptive scanning. This is also the part where the user interfaces (discord bot, etc) will connecto to for their queries
+
+All the connections between the parts will probably be facilitated by something like [ZeroMQ](https://zeromq.org/).

@@ -1,5 +1,6 @@
 #ifndef MASSCAN_H
 #define MASSCAN_H
+#include <stdio.h>
 
 /* yoink */
 
@@ -69,13 +70,18 @@ struct masscan_record {
 };
 
 enum masscan_parser_source_type {
-    MASSCAN_PARSER_SRC_FD,
+    MASSCAN_PARSER_SRC_FILEP,
+    MASSCAN_PARSER_SRC_MEMORY,
 };
 
 struct masscan_parser_source {
     enum masscan_parser_source_type type;
     union {
-        int fd;
+        FILE *fp;
+        struct {
+            const char *ptr;
+            size_t len;
+        } mem;
     } v;
 };
 

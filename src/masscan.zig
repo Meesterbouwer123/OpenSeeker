@@ -15,14 +15,18 @@ pub const SourceReader = struct {
         return switch (sr.source.type) {
             h.MASSCAN_PARSER_SRC_FILEP => {
                 const n = h.fread(buf.ptr, 1, buf.len, sr.source.v.fp);
+
                 // TODO: translate errno
                 if (n != buf.len and h.ferror(sr.source.v.fp) != 0) return error.CError;
+
                 return n;
             },
             h.MASSCAN_PARSER_SRC_MEMORY => {
                 const to_copy = @min(buf.len, sr.source.v.mem.len);
+
                 @memcpy(buf[0..to_copy], sr.source.v.mem.ptr[0..to_copy]);
                 sr.source.v.mem.ptr += to_copy;
+
                 return to_copy;
             },
             else => unreachable,
@@ -39,9 +43,15 @@ pub const SourceReader = struct {
 test "read from memory" {
     const memory = "meow meow";
     var rd = SourceReader{
-        .source = .{ .type = h.MASSCAN_PARSER_SRC_MEMORY, .v = .{
-            .mem = .{ .ptr = @ptrCast(memory.ptr), .len = memory.len },
-        } },
+        .source = .{
+            .type = h.MASSCAN_PARSER_SRC_MEMORY,
+            .v = .{
+                .mem = .{
+                    .ptr = @ptrCast(memory.ptr),
+                    .len = memory.len,
+                },
+            },
+        },
     };
 
     var tmp: [9]u8 = undefined;

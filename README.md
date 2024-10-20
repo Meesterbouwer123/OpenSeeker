@@ -9,6 +9,11 @@ A ServerSeeker clone, but now open-source
 4. Submit the IPs to a program that does the SLP. Ideally, this should be able to be separate enough, so it can be run on a different machine if desired. How about something like [zeromq](https://zeromq.org)?
 5. Do the [SLP](https://wiki.vg/Server_List_Ping). If it doesn't succeed, use the legacy ping. If that doesn't succeed, try to join in offline mode. This should be fast, so an event loop like [libxev](https://github.com/mitchellh/libxev) or [libuv](https://libuv.org/).
 6. Store the information: at least timestamp, IP, port, banner, players, offline mode. Wasn't there also some kind of BungeeCord exploit? This should probably be in some kind of database, like [SQLite](https://sqlite.org) or [PostgreSQL](https://postgresql.org).
+
+![diagram of how the whole pipeline works](./arch.svg)
+
+A nicety of this pipeline is that you can add and remove SLPers and masscan dispatchers as needed, which should Just Work.
+
 ### Proposal: Meesterbouwer123
 The main scanning operation consists of 3 parts: *discovery*, *pinger* and *database*.
 
@@ -19,3 +24,9 @@ The *pinger* will take the outputs from the discovery, and perform a [Server Lis
 The *database* will store all the results from the pinger, and will give the pinger also a list of old servers back to see if the data is still accurate. It will also give the discovery interesting ranges to scan, as a form of adaptive scanning. This is also the part where the user interfaces (discord bot, etc) will connecto to for their queries
 
 All the connections between the parts will probably be facilitated by something like [ZeroMQ](https://zeromq.org/).
+
+## Implementation
+Right now, you can run `ventilator` as the broker in the background, then some `slper`s, and some `masscan_dispatcher` instances. These just wrap `masscan`, so use any arguments you want, for example `-p 25565 10.0.0.0/24`. For the time being, only Linux is supported, because I didn't bother to implement cross-platform FIFO creation.
+
+### Next Up: SLPer
+The SLPer should actually perform the SLPs to the servers and extract information. Where that information goes is an open question, and should be discussed further.

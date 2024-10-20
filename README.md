@@ -25,6 +25,8 @@ The *database* will store all the results from the pinger, and will give the pin
 
 All the connections between the parts will probably be facilitated by something like [ZeroMQ](https://zeromq.org/).
 
+![diagram of how the parts would be connected](./arch2.svg)
+
 ## Implementation
 Right now, you can run `ventilator` as the broker in the background, then some `slper`s, and some `masscan_dispatcher` instances. These just wrap `masscan`, so use any arguments you want, for example `-p 25565 10.0.0.0/24`. For the time being, only Linux is supported, because I didn't bother to implement cross-platform FIFO creation.
 

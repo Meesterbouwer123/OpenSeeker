@@ -5,7 +5,7 @@ pub const c = @cImport(@cInclude("zmq.h"));
 // - look into a better mechanism than zmq_errno -- seriously, having to call that sucks!
 
 fn unexpectedError(e: c_int) noreturn {
-    std.log.err("unknown error {d}, '{s}'", .{e, c.zmq_strerror(e)});
+    std.log.err("unknown error {d}, '{s}'", .{ e, c.zmq_strerror(e) });
     @panic("bug: unexpected zmq error");
 }
 
@@ -225,7 +225,7 @@ pub const Socket = opaque {
     pub fn recv(sock: *Socket, b: []u8, options: SendRecvOptions) error{ WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated }!usize {
         const res = c.zmq_recv(sock, b.ptr, b.len, @bitCast(options));
         return if (res >= 0) @intCast(res) else switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => unreachable, // user error: sock was null.
             c.EAGAIN => error.WouldBlock,
             c.ENOTSUP => error.SocketTypeNotForReceiving,
             c.EFSM => error.IllegalState,
@@ -235,9 +235,25 @@ pub const Socket = opaque {
         };
     }
 
+    /// wraps recv with checking for the correct len
+    pub fn recvExact(sock: *Socket, b: []u8, options: SendRecvOptions) error{ WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated, Truncated, NotEnoughData }!void {
+        const n = try sock.recv(b, options);
+        if (n == b.len) {
+            @branchHint(.likely);
+            return;
+        } else if (n < b.len) {
+            @branchHint(.unlikely);
+            return error.NotEnoughData;
+        } else if (n > b.len) {
+            @branchHint(.unlikely);
+            return error.Truncated;
+        }
+        unreachable;
+    }
+
     /// zmq_bind
     pub fn bind(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
-        if (c.zmq_bind(sock, endpoint)  != 0) return switch (c.zmq_errno()) {
+        if (c.zmq_bind(sock, endpoint) != 0) return switch (c.zmq_errno()) {
             c.ENOTSOCK => unreachable, // user error: sock was null
             c.EINVAL => error.InvalidValue,
             c.EPROTONOSUPPORT => error.UnsupportedProtocol,
@@ -253,7 +269,7 @@ pub const Socket = opaque {
 
     /// zmq_connect
     pub fn connect(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
-        if (c.zmq_connect(sock, endpoint)  != 0) return switch (c.zmq_errno()) {
+        if (c.zmq_connect(sock, endpoint) != 0) return switch (c.zmq_errno()) {
             c.ENOTSOCK => unreachable, // user error: sock was null
             c.EINVAL => error.InvalidValue,
             c.EPROTONOSUPPORT => error.UnsupportedProtocol,
@@ -278,7 +294,7 @@ pub const Message = extern struct {
 
     pub fn initCapacity(cap: usize) error{OutOfMemory}!Message {
         var m: Message = undefined;
-        if (c.zmq_msg_init_size(&m.i, cap) != 0) return switch(c.zmq_errno()) {
+        if (c.zmq_msg_init_size(&m.i, cap) != 0) return switch (c.zmq_errno()) {
             c.ENOMEM => error.OutOfMemory,
             else => |unex| unexpectedError(unex),
         };
@@ -287,7 +303,7 @@ pub const Message = extern struct {
 
     pub fn initOwned(buf: []u8, freeFn: ?*const FreeFn, hint: ?*anyopaque) error{OutOfMemory}!Message {
         var m: Message = undefined;
-        if (c.zmq_msg_init_data(&m.i, buf.ptr, buf.len, freeFn, hint) != 0) return switch(c.zmq_errno()) {
+        if (c.zmq_msg_init_data(&m.i, buf.ptr, buf.len, freeFn, hint) != 0) return switch (c.zmq_errno()) {
             c.ENOMEM => error.OutOfMemory,
             else => |unex| unexpectedError(unex),
         };
@@ -296,7 +312,7 @@ pub const Message = extern struct {
 
     pub fn initCopy(buf: []const u8) error{OutOfMemory}!Message {
         var m: Message = undefined;
-        if (c.zmq_msg_init_buffer(&m.i, buf.ptr, buf.len) != 0) return switch(c.zmq_errno()) {
+        if (c.zmq_msg_init_buffer(&m.i, buf.ptr, buf.len) != 0) return switch (c.zmq_errno()) {
             c.ENOMEM => error.OutOfMemory,
             else => |unex| unexpectedError(unex),
         };
@@ -318,7 +334,6 @@ pub const Message = extern struct {
     pub fn deinit(m: *Message) void {
         if (c.zmq_msg_close(&m.i) != 0) unreachable;
     }
-
 
     // recurses to eintr loop
     /// zmq_msg_send
@@ -365,7 +380,7 @@ pub const z85 = struct {
 
     /// out must be at least `encodedLen(in.len)` long
     pub fn encode(noalias out: [*]u8, in: []const u8) void {
-       _ = c.zmq_z85_encode(out, in.ptr, in.len);
+        _ = c.zmq_z85_encode(out, in.ptr, in.len);
     }
 
     /// out must be at least `decodedLen(in.len)` long

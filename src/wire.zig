@@ -59,8 +59,7 @@ pub const Host = extern struct {
 
     pub inline fn recv(sock: *zmq.Socket) !Host {
         var h: Host = undefined;
-        const n = try sock.recv(std.mem.asBytes(&h), .{});
-        if (n != @sizeOf(Host)) return error.BadMessageLength;
+        try sock.recvExact(std.mem.asBytes(&h), .{});
         return h;
     }
 };
@@ -91,8 +90,7 @@ pub const Range = extern struct {
 
     pub inline fn recv(sock: *zmq.Socket) !Range {
         var v: Range = undefined;
-        const n = try sock.recv(&v, .{});
-        if (n != @sizeOf(Range)) return error.BadMessageLength;
+        try sock.recvExact(&v, .{});
         return v;
     }
 };
@@ -107,13 +105,20 @@ pub const DiscoveryRequest = extern struct {
     previous_duration_ms: u32 align(1),
 
     /// TAKES OWNERSHIP of `dr`. `dr` must be allocated with the c allocator.
-    pub fn send(dr: *DiscoveryRequest, sock: *zmq.Socket) !void {
-        try sock.send("1d", .{.sndmore = true});
-
+    pub fn send(dr: *DiscoveryRequest, sock: *zmq.Socket, options: zmq.Socket.SendRecvOptions) !void {
         var m = try zmq.Message.initOwned(std.mem.asBytes(dr), wireFree, null);
         errdefer m.deinit();
 
-        try m.send(sock, .{});
+        try m.send(sock, options);
+    }
+
+    pub fn recv(sock: *zmq.Socket, options: zmq.Socket.SendRecvOptions) !*DiscoveryRequest {
+        // TODO: zero-copy
+        const dr = try std.heap.c_allocator.create(DiscoveryRequest);
+        errdefer std.heap.c_allocator.destroy(dr);
+
+        try sock.recvExact(std.mem.asBytes(dr), options);
+        return dr;
     }
 };
 
@@ -121,59 +126,20 @@ pub const SlpRequest = extern struct {
     preferred_bucket_size: u32 align(1),
 
     /// TAKES OWNERSHIP of `dr`. `dr` must be allocated with the c allocator.
-    pub fn send(sr: *SlpRequest, sock: *zmq.Socket) !void {
-        try sock.send("1s", .{.sndmore = true});
-
+    pub fn send(sr: *SlpRequest, sock: *zmq.Socket, options: zmq.Socket.SendRecvOptions) !void {
         var m = try zmq.Message.initOwned(std.mem.asBytes(sr), wireFree, null);
         errdefer m.deinit();
 
-        try m.send(sock, .{});
-    }
-};
-
-pub const Request = struct {
-    msg: zmq.Message,
-    v: union(enum) {
-        slp: *SlpRequest,
-        discovery: *DiscoveryRequest,
-    },
-
-    pub fn deinit(r: *Request) void {
-        r.msg.deinit();
-        r.* = undefined;
+        try m.send(sock, options);
     }
 
-    /// Will be allocated with the C allocator.
-    pub fn recv(sock: *zmq.Socket) !Request {
-        var buf: [2]u8 = undefined;
-        const n = try sock.recv(&buf, .{});
-        if (n != buf.len) return error.BadMessageLength;
+    pub fn recv(sock: *zmq.Socket, options: zmq.Socket.SendRecvOptions) !*SlpRequest {
+        // TODO: zero-copy
+        const sr = try std.heap.c_allocator.create(SlpRequest);
+        errdefer std.heap.c_allocator.destroy(sr);
 
-        if (buf[0] != '1') return error.IncompatibleVersion;
-
-        const size: usize = switch(buf[1]) {
-            'd' => @sizeOf(DiscoveryRequest),
-            's' => @sizeOf(SlpRequest),
-            else => return error.IllegalRequest,
-        };
-
-        var m = try zmq.Message.initCapacity(size);
-        errdefer m.deinit();
-
-        try m.recv(sock, .{});
-        if (m.len() != size) return error.Bruh;
-
-        return switch (buf[1]) {
-            'd' => .{
-                .msg = m,
-                .v = .{ .discovery = @ptrCast(m.dataPtr())},
-            },
-            's' => .{
-                .msg = m,
-                .v = .{ .slp = @ptrCast(m.dataPtr())},
-            },
-            else => unreachable,
-        };
+        try sock.recvExact(std.mem.asBytes(sr), options);
+        return sr;
     }
 };
 
@@ -190,7 +156,7 @@ test "send a host" {
     try b.connect("inproc://Host");
 
     const h: Host = .{
-        .ip = .{.i = 0x01020304},
+        .ip = .{ .i = 0x01020304 },
         .port = 6969,
     };
     try h.send(a);
@@ -198,12 +164,10 @@ test "send a host" {
     try std.testing.expectEqualSlices(u8, &std.mem.toBytes(h), &std.mem.toBytes(n));
 }
 
-
 test {
     std.testing.refAllDecls(Ip);
     std.testing.refAllDecls(Host);
     std.testing.refAllDecls(Range);
     std.testing.refAllDecls(DiscoveryRequest);
     std.testing.refAllDecls(SlpRequest);
-    std.testing.refAllDecls(Request);
 }

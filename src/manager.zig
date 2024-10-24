@@ -4,7 +4,6 @@ const wire = @import("wire.zig");
 const conf = @import("conf.zig");
 const sqlite = @import("sqlite");
 
-
 const Config = struct {
     db_path: []const u8 = "openseeker_manager.sqlite3",
 
@@ -44,15 +43,15 @@ pub const State = struct {
 
         const announce = try ctx.socket(.rep);
         errdefer announce.close();
-        try announce.bind(std.os.argv[1]);
+        try announce.bind_nonterminated(config.announce, std.heap.c_allocator);
 
         const collect = try ctx.socket(.pull);
         errdefer collect.close();
-        try collect.bind(std.os.argv[2]);
+        try collect.bind_nonterminated(config.collect, std.heap.c_allocator);
 
         const api = try ctx.socket(.rep);
         errdefer api.close();
-        try api.bind(std.os.argv[3]);
+        try api.bind_nonterminated(config.api, std.heap.c_allocator);
 
         const zt_file_name = try std.heap.c_allocator.dupeZ(u8, config.db_path);
         defer std.heap.c_allocator.free(zt_file_name);
@@ -119,7 +118,6 @@ pub const State = struct {
         state.collect_thread.join();
         state.api_thread.join();
     }
-
 
     fn announceWorker(state: *State) void {
         _ = state;
@@ -270,7 +268,7 @@ pub const State = struct {
 
 pub fn main() !void {
     if (std.os.argv.len < 2) {
-        std.debug.print("{s} <config file>", .{std.os.argv[0]});
+        std.debug.print("{s} <config file>\n", .{std.os.argv[0]});
         return error.TooFewArguments;
     }
 
@@ -281,5 +279,4 @@ pub fn main() !void {
     try s.init(config_buf);
     defer s.deinit();
     try s.initDb();
-
 }

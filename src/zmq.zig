@@ -267,6 +267,12 @@ pub const Socket = opaque {
         };
     }
 
+    pub fn bind_nonterminated(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
+        const formatted_endpoint = try allocator.dupeZ(u8, endpoint);
+        defer allocator.free(formatted_endpoint);
+        return bind(sock, formatted_endpoint);
+    }
+
     /// zmq_connect
     pub fn connect(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
         if (c.zmq_connect(sock, endpoint) != 0) return switch (c.zmq_errno()) {

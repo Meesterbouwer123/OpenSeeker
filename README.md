@@ -19,5 +19,7 @@ All of thse will be connected using [ZeroMQ](https://zeromq.org/).
 ## Implementation
 Right now there is a basic manager to set up the database, and a lot of unused files for the other parts XD.
 
+Building/running this on windows is currently not supported, try using WSL instead.
+
 ## Proposals
 None yet, add something here if you have a cool idea.

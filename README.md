@@ -1,7 +1,16 @@
 # OpenSeeker
 A ServerSeeker clone, but now open-source
 
+## Building
+Get the [latest master version](https://ziglang.org/download) of Zig. Run `zig build`.
+
 ## Structure
+
+![diagram of how the whole pipeline works](./arch.svg)
+
+At its
+
+## Proposals
 ### Proposal: notcancername
 1. Run `masscan`.
 2. Collect results from `masscan`, in its binary format.
@@ -10,9 +19,11 @@ A ServerSeeker clone, but now open-source
 5. Do the [SLP](https://wiki.vg/Server_List_Ping). If it doesn't succeed, use the legacy ping. If that doesn't succeed, try to join in offline mode. This should be fast, so an event loop like [libxev](https://github.com/mitchellh/libxev) or [libuv](https://libuv.org/).
 6. Store the information: at least timestamp, IP, port, banner, players, offline mode. Wasn't there also some kind of BungeeCord exploit? This should probably be in some kind of database, like [SQLite](https://sqlite.org) or [PostgreSQL](https://postgresql.org).
 
-![diagram of how the whole pipeline works](./arch.svg)
+A nicety of this pipeline is that you can add and remove SLPers and masscan dispatchers as needed,
+which should Just Work.
 
-A nicety of this pipeline is that you can add and remove SLPers and masscan dispatchers as needed, which should Just Work.
+#### Implementation
+Right now, you can run `ventilator` as the broker in the background, then some `slper`s, and some `masscan_dispatcher` instances. These just wrap `masscan`, so use any arguments you want, for example `-p 25565 10.0.0.0/24`. For the time being, only Linux is supported, because I didn't bother to implement cross-platform FIFO creation.
 
 ### Proposal: Meesterbouwer123
 The main scanning operation consists of 3 parts: *discovery*, *pinger* and *database*.
@@ -26,9 +37,3 @@ The *database* will store all the results from the pinger, and will give the pin
 All the connections between the parts will probably be facilitated by something like [ZeroMQ](https://zeromq.org/).
 
 ![diagram of how the parts would be connected](./arch2.svg)
-
-## Implementation
-Right now, you can run `ventilator` as the broker in the background, then some `slper`s, and some `masscan_dispatcher` instances. These just wrap `masscan`, so use any arguments you want, for example `-p 25565 10.0.0.0/24`. For the time being, only Linux is supported, because I didn't bother to implement cross-platform FIFO creation.
-
-### Next Up: SLPer
-The SLPer should actually perform the SLPs to the servers and extract information. Where that information goes is an open question, and should be discussed further.

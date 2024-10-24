@@ -352,3 +352,24 @@ pub const Message = extern struct {
         };
     }
 };
+
+pub const z85 = struct {
+    /// Includes the null byte
+    pub fn encodedLen(in: usize) usize {
+        return in * 5 / 4 + 1;
+    }
+
+    pub fn decodedLen(in: usize) usize {
+        return in * 8 / 10;
+    }
+
+    /// out must be at least `encodedLen(in.len)` long
+    pub fn encode(noalias out: [*]u8, in: []const u8) void {
+       _ = c.zmq_z85_encode(out, in.ptr, in.len);
+    }
+
+    /// out must be at least `decodedLen(in.len)` long
+    pub fn decode(noalias out: [*]u8, in: [*:0]const u8) error{IllegalValue}!void {
+        if (c.zmq_z85_decode(out, in) != out) return error.IllegalValue;
+    }
+};

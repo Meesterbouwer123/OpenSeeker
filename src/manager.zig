@@ -86,7 +86,7 @@ pub const State = struct {
         );
         errdefer state.announce_thread.detach(); // thread will terminate on its own due to error.Terminated
 
-        state.announce_thread = try std.Thread.spawn(
+        state.api_thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
             apiWorker,
             .{state},

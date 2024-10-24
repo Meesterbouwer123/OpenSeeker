@@ -61,7 +61,6 @@ pub fn build(b: *std.Build) void {
     });
     ventilator.addIncludePath(b.path("src"));
     ventilator.linkSystemLibrary("zmq");
-    b.installArtifact(ventilator);
 
     const manager = b.addExecutable(.{
         .name = "manager",
@@ -71,12 +70,24 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .linkage = linkage,
     });
-    manager.addIncludePath(b.path("src"));
     manager.linkSystemLibrary("zmq");
     manager.root_module.addImport("sqlite", sqlite.module("sqlite"));
     manager.linkLibrary(sqlite.artifact("sqlite"));
 
+    const gen_keypair = b.addExecutable(.{
+        .name = "gen_keypair",
+        .root_source_file = b.path("src/gen_keypair.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .linkage = linkage,
+    });
+    gen_keypair.linkSystemLibrary("zmq");
+
+
+    b.installArtifact(ventilator);
     b.installArtifact(manager);
+    b.installArtifact(gen_keypair);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(test_masscan_parser).step);

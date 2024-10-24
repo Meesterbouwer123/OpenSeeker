@@ -51,16 +51,16 @@ pub fn build(b: *std.Build) void {
     test_masscan_parser.addIncludePath(b.path("src"));
     test_masscan_parser.addObject(list_parser);
 
-    const ventilator = b.addExecutable(.{
-        .name = "ventilator",
-        .root_source_file = b.path("src/ventilator.zig"),
+    const discovery = b.addExecutable(.{
+        .name = "discovery",
+        .root_source_file = b.path("src/discovery.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .linkage = linkage,
     });
-    ventilator.addIncludePath(b.path("src"));
-    ventilator.linkSystemLibrary("zmq");
+    discovery.addIncludePath(b.path("src"));
+    discovery.linkSystemLibrary("zmq");
 
     const manager = b.addExecutable(.{
         .name = "manager",
@@ -84,8 +84,7 @@ pub fn build(b: *std.Build) void {
     });
     gen_keypair.linkSystemLibrary("zmq");
 
-
-    b.installArtifact(ventilator);
+    b.installArtifact(discovery);
     b.installArtifact(manager);
     b.installArtifact(gen_keypair);
 

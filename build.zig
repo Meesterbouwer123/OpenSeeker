@@ -17,6 +17,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
     const linkage = b.option(std.builtin.LinkMode, "linkage", "How to link, defaults to dynamic") orelse .dynamic;
 
+    const sqlite = b.dependency("sqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const list_parser = obj(b, "src/masscan_list_parser.zig", target, optimize);
 
     // const masscan_parser_static = b.addStaticLibrary(.{
@@ -58,30 +63,20 @@ pub fn build(b: *std.Build) void {
     ventilator.linkSystemLibrary("zmq");
     b.installArtifact(ventilator);
 
-    const masscan_dispatcher = b.addExecutable(.{
-        .name = "masscan_dispatcher",
-        .root_source_file = b.path("src/masscan_dispatcher.zig"),
+    const manager = b.addExecutable(.{
+        .name = "manager",
+        .root_source_file = b.path("src/manager.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .linkage = linkage,
     });
-    masscan_dispatcher.addIncludePath(b.path("src"));
-    masscan_dispatcher.addObject(list_parser);
-    masscan_dispatcher.linkSystemLibrary("zmq");
-    b.installArtifact(masscan_dispatcher);
+    manager.addIncludePath(b.path("src"));
+    manager.linkSystemLibrary("zmq");
+    manager.root_module.addImport("sqlite", sqlite.module("sqlite"));
+    manager.linkLibrary(sqlite.artifact("sqlite"));
 
-    const slper = b.addExecutable(.{
-        .name = "slper",
-        .root_source_file = b.path("src/slper.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .linkage = linkage,
-    });
-    slper.addIncludePath(b.path("src"));
-    slper.linkSystemLibrary("zmq");
-    b.installArtifact(slper);
+    b.installArtifact(manager);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(test_masscan_parser).step);

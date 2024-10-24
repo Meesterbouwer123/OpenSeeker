@@ -38,7 +38,8 @@ pub fn main() !void {
     });
     defer db.deinit();
 
-    try db.exec(
+    // we use ecexDynamic here because the query is too long to validate at compile time
+    try db.execDynamic(
         \\PRAGMA schema.user_version = 0;
         \\PRAGMA foreign_keys = ON;
         \\

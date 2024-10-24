@@ -6,7 +6,7 @@ pub fn parse(comptime Config: type, buf: []const u8) !Config {
     var lines = std.mem.splitScalar(u8, buf, '\n');
     while (lines.next()) |line| {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
-        const key = words.next().?;
+        const key = words.next() orelse continue;
         const value = words.rest();
 
         inline for(@typeInfo(Config).@"struct".fields) |field| {

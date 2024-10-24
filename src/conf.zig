@@ -19,7 +19,7 @@ pub fn parse(comptime Config: type, buf: []const u8) !Config {
 
 fn parseValue(comptime T: type, value: []const u8) !T {
      return switch (@typeInfo(T)) {
-         .optional => |o| if (value.len == 0) null else parseValue(o.child, value),
+         .optional => |o| if (value.len == 0) null else try parseValue(o.child, value),
          .int => try std.fmt.parseInt(T, value, 0),
          .float => try std.fmt.parseFloat(T, value),
          .pointer => |p| switch(p.size) {

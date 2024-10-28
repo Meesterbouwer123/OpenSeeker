@@ -181,6 +181,14 @@ pub const Socket = opaque {
         _,
     };
 
+    pub const Property = extern struct {
+        str: [*:0]const u8,
+
+        pub const socket_type = .{ .str = "Socket-Type" };
+        pub const routing_id = .{ .str = "Routing-Id" };
+        pub const user_id = .{ .str = "User-Id" };
+    };
+
     pub const SendRecvOptions = packed struct(c_int) {
         dontwait: bool = false,
         sndmore: bool = false,
@@ -194,12 +202,24 @@ pub const Socket = opaque {
 
     // recurses to eintr loop
     /// zmq_setsockopt
-    pub fn setOption(sock: *Socket, opt: Option, value: ?*anyopaque, len: usize) error{ IllegalValue, Terminated }!void {
+    pub fn setOption(sock: *Socket, opt: Option, value: ?*const anyopaque, len: usize) error{ IllegalValue, Terminated }!void {
         if (c.zmq_setsockopt(sock, @intFromEnum(opt), value, len) != 0) return switch (c.zmq_errno()) {
             c.ENOTSOCK => unreachable, // user error: sock was null
             c.EINVAL => error.IllegalValue,
             c.ETERM => error.Terminated,
             c.EINTR => @call(.always_tail, setOption, .{ sock, opt, value, len }),
+            else => |unex| unexpectedError(unex),
+        };
+    }
+
+    // recurses to eintr loop
+    /// zmq_setsockopt
+    pub fn getOption(sock: *Socket, opt: Option, value: ?*anyopaque, len: usize) error{ IllegalValue, Terminated }!void {
+        if (c.zmq_getsockopt(sock, @intFromEnum(opt), value, len) != 0) return switch (c.zmq_errno()) {
+            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.EINVAL => error.IllegalValue,
+            c.ETERM => error.Terminated,
+            c.EINTR => @call(.always_tail, getOption, .{ sock, opt, value, len }),
             else => |unex| unexpectedError(unex),
         };
     }
@@ -252,7 +272,7 @@ pub const Socket = opaque {
     }
 
     /// zmq_bind
-    pub fn bind(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
+    pub fn bindZ(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
         if (c.zmq_bind(sock, endpoint) != 0) return switch (c.zmq_errno()) {
             c.ENOTSOCK => unreachable, // user error: sock was null
             c.EINVAL => error.InvalidValue,
@@ -267,14 +287,14 @@ pub const Socket = opaque {
         };
     }
 
-    pub fn bind_nonterminated(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
+    pub fn bind(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
         const formatted_endpoint = try allocator.dupeZ(u8, endpoint);
         defer allocator.free(formatted_endpoint);
-        return bind(sock, formatted_endpoint);
+        return bindZ(sock, formatted_endpoint);
     }
 
     /// zmq_connect
-    pub fn connect(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
+    pub fn connectZ(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
         if (c.zmq_connect(sock, endpoint) != 0) return switch (c.zmq_errno()) {
             c.ENOTSOCK => unreachable, // user error: sock was null
             c.EINVAL => error.InvalidValue,
@@ -284,6 +304,27 @@ pub const Socket = opaque {
             c.ETERM => error.Terminated,
             else => |unex| unexpectedError(unex),
         };
+    }
+
+    pub fn connect(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
+        const formatted_endpoint = try allocator.dupeZ(u8, endpoint);
+        defer allocator.free(formatted_endpoint);
+        return connectZ(sock, formatted_endpoint);
+    }
+
+    /// Returns the number of frames discarded.
+    pub fn discardRemainingFrames(sock: *Socket, options: SendRecvOptions) !usize {
+        var nb_discarded: usize = 0;
+        var has_more: c_int = undefined;
+        try sock.getOption(.rcvmore, &has_more, @sizeOf(c_int));
+        while (has_more != 0) {
+            var m = Message.init();
+            defer m.deinit();
+            try m.recv(sock, options);
+            try sock.getOption(.rcvmore, &has_more, @sizeOf(c_int));
+            nb_discarded += 1;
+        }
+        return nb_discarded;
     }
 };
 

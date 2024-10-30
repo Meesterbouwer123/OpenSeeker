@@ -35,6 +35,7 @@ pub const Announce = struct {
         }
 
         const buf = try alist.toOwnedSlice(std.heap.c_allocator);
+        errdefer std.heap.c_allocator.free(buf);
         try wire.send(rheader, announce.socket, .{ .sndmore = true });
 
         var m = try zmq.Message.initOwned(std.mem.sliceAsBytes(buf), wire.wireFree, null);
@@ -76,13 +77,46 @@ pub const Announce = struct {
         }
     }
 
-    pub fn handleDiscoveryRequest(announce: *Announce, subnets_to_scan: anytype, excluded_hosts: anytype) !void {
-        _ = subnets_to_scan; // autofix
-        _ = excluded_hosts; // autofix
+    pub fn handleDiscoveryRequest(announce: *Announce, subnets_to_scan: anytype, excluded_ranges: anytype, delete_discovery_subnet: anytype) !void {
         const discovery_request = try wire.recv(wire.DiscoveryRequest, announce.socket, .{});
 
-        _ = discovery_request; // autofix
+        if (!discovery_request.flags.is_first_request) {
+            try delete_discovery_subnet.exec(
+                .{},
+                .{
+                    .prefix = discovery_request.previous_range.prefix,
+                    .msbs = discovery_request.previous_range.msbs,
+                },
+            );
+        }
 
+        const new_range = try subnets_to_scan.one(wire.Range, .{}, .{ .limit = 1 });
+
+        var alist: std.ArrayListUnmanaged(wire.Range) = .{};
+        defer alist.deinit(std.heap.c_allocator);
+
+        {
+            const range_to_search: wire.Range = if (discovery_request.flags.is_first_request)
+                .{ .prefix = wire.Ip{ .i = 0 }, .msbs = 0 }
+            else
+                .{
+                    .prefix = discovery_request.previous_range.prefix,
+                    .msbs = discovery_request.previous_range.msbs,
+                };
+            var exclude_iter = try excluded_ranges.iterator(
+                wire.Range,
+                range_to_search,
+            );
+
+            while (try exclude_iter.next(.{})) |range| {
+                try alist.append(std.heap.c_allocator, range);
+            }
+        }
+
+        const excluded = try alist.toOwnedSlice(std.heap.c_allocator);
+
+        try announce.socket.send(std.mem.asBytes(&new_range), .{ .sndmore = true });
+        try announce.socket.send(std.mem.sliceAsBytes(excluded), .{ .sndmore = true });
     }
 
     pub fn worker(announce: *Announce) void {
@@ -91,30 +125,15 @@ pub const Announce = struct {
         var hosts_to_slp = state.db.prepare("SELECT ip, port FROM pending_ping ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
         var hosts_to_join = state.db.prepare("SELECT ip, port FROM pending_join ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
         var subnets_to_scan = state.db.prepare("SELECT prefix, msbs FROM pending_discovery ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
-        var excluded_hosts = state.db.prepare(
-            \\SELECT excluded.prefix, excluded.msbs
-            \\FROM excluded
-            \\WHERE EXISTS (
-            \\    SELECT 1
-            \\    FROM pending_legacy
-            \\    WHERE excluded.prefix = pending_legacy.ip
-            \\) OR EXISTS (
-            \\    SELECT 1
-            \\    FROM pending_ping
-            \\    WHERE excluded.prefix = pending_legacy.ip
-            \\) OR EXISTS (
-            \\    SELECT 1
-            \\    FROM pending_
-            \\    WHERE excluded.prefix = pending_legacy.ip
-            \\)
-        ) catch @panic("bruh");
+        var delete_discovery_subnet = state.db.prepare("DELETE FROM pending_discovery WHERE prefix = ? and msbs = ?") catch @panic("bruh");
+        var excluded_ranges = state.db.prepare(@embedFile("sql/excluded_ranges.sql")) catch @panic("bruh");
 
         while (true) {
             hosts_to_legacy.reset();
             hosts_to_slp.reset();
             hosts_to_join.reset();
             subnets_to_scan.reset();
-            excluded_hosts.reset();
+            excluded_ranges.reset();
 
             discard: {
                 const nb_discarded = announce.socket.discardRemainingFrames(.{}) catch |err| {
@@ -139,7 +158,7 @@ pub const Announce = struct {
 
             const res = switch (header.kind) {
                 .slp => handleSlpRequest(announce, &hosts_to_legacy, &hosts_to_slp, &hosts_to_join),
-                .discovery => handleDiscoveryRequest(announce, &subnets_to_scan, &excluded_hosts),
+                .discovery => handleDiscoveryRequest(announce, &subnets_to_scan, &excluded_ranges, &delete_discovery_subnet),
 
                 _ => |k| {
                     log.warn("incorrect kind {d}", .{@intFromEnum(k)});
@@ -172,149 +191,6 @@ pub const State = struct {
     api_thread: std.Thread,
 
     arena: std.heap.ArenaAllocator,
-
-    pub const setup_sql =
-        \\PRAGMA user_version = 0;
-        \\PRAGMA foreign_keys = ON;
-        \\
-        \\CREATE TABLE IF NOT EXISTS excluded (
-        \\    prefix INT NOT NULL CHECK(prefix >= 0 AND prefix < 1 << 32 AND prefix & (0xffffffff >> msbs) == 0),
-        \\    msbs INT NOT NULL CHECK(msbs >= 0 AND msbs <= 32),
-        \\    reason TEXT,
-        \\    PRIMARY KEY(prefix, msbs)
-        \\) STRICT;
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_excluded_msbs ON excluded (msbs);
-        \\
-        \\CREATE TABLE IF NOT EXISTS pending_discovery (
-        \\    prefix INT NOT NULL CHECK(prefix >= 0 AND prefix < 1 << 32 AND prefix & (0xffffffff >> msbs) == 0),
-        \\    msbs INT NOT NULL CHECK(msbs >= 0 AND msbs <= 32),
-        \\    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
-        \\    PRIMARY KEY(prefix, msbs)
-        \\) STRICT;
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_pending_discovery_priority ON pending_discovery (priority DESC);
-        \\
-        \\CREATE TABLE IF NOT EXISTS pending_ping (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
-        \\    PRIMARY KEY(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_pending_ping_priority ON pending_ping (priority DESC);
-        \\
-        \\CREATE TABLE IF NOT EXISTS pending_legacy (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
-        \\    PRIMARY KEY(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_pending_legacy_priority ON pending_legacy (priority DESC);
-        \\
-        \\CREATE TABLE IF NOT EXISTS pending_join (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
-        \\    PRIMARY KEY(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE INDEX IF NOT EXISTS idx_pending_join_priority ON pending_join (priority DESC);
-        \\
-        \\CREATE TABLE IF NOT EXISTS servers (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    PRIMARY KEY(ip, port)
-        \\) STRICT;
-        \\
-        \\
-        \\CREATE TABLE IF NOT EXISTS discoveries (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS favicons (
-        \\    data BLOB PRIMARY KEY
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS failed_pings (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS successful_pings (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\    enforces_secure_chat INT,
-        \\    prevents_chat_reports INT,
-        \\    version_name TEXT,
-        \\    version_protocol INT NOT NULL,
-        \\    favicon_id INT,
-        \\    max_players INT,
-        \\    current_players INT,
-        // because the description can contain arbitrary json, we save arbitrary json that we can
-        // render, except when it's just text.
-        \\    description_json TEXT,
-        \\    description_text TEXT,
-        \\    extra_json TEXT,
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port),
-        \\    FOREIGN KEY (favicon_id) REFERENCES favicons(_rowid_)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS failed_legacy_pings (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS successful_legacy_pings (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\    max_players INT NOT NULL,
-        \\    current_players INT NOT NULL,
-        \\    description TEXT NOT NULL,
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS failed_joins (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS successful_joins (
-        \\    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
-        \\    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
-        \\    timestamp INT NOT NULL,
-        // TODO: which information can be gained from joining?
-        \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS players (
-        \\    uuid_low INT NOT NULL,
-        \\    uuid_high INT NOT NULL,
-        \\    name BLOB NOT NULL,
-        \\   PRIMARY KEY (uuid_high, uuid_low)
-        \\) STRICT;
-        \\
-        \\CREATE TABLE IF NOT EXISTS ping_players (
-        \\    ping_id INT NOT NULL,
-        \\    player_uuid INT NOT NULL,
-        \\    PRIMARY KEY (ping_id, player_uuid),
-        \\    FOREIGN KEY (ping_id) REFERENCES successful_pings(_rowid_),
-        \\    FOREIGN KEY (player_uuid) REFERENCES players(uuid)
-        \\) STRICT;
-    ;
 
     pub fn init(state: *State, config_buf: []const u8) !void {
         state.* = undefined;
@@ -362,7 +238,7 @@ pub const State = struct {
 
         var diags: sqlite.Diagnostics = .{};
         state.db.execMulti(
-            setup_sql,
+            @embedFile("sql/first_run.sql"),
             .{ .diags = &diags },
         ) catch |e| {
             std.log.warn("{} {s}\n", .{ diags, @errorName(e) });
@@ -428,12 +304,11 @@ pub const State = struct {
 };
 
 pub fn main() !void {
-    try std.io.getStdOut().writeAll(State.setup_sql);
-
     const config_buf = if (std.os.argv.len < 2) "" else try std.fs.cwd().readFileAlloc(std.heap.c_allocator, std.mem.span(std.os.argv[1]), 10 << 20);
     defer std.heap.c_allocator.free(config_buf);
 
     var s: State = undefined;
     try s.init(config_buf);
     defer s.deinit();
+    s.join();
 }

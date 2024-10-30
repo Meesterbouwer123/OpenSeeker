@@ -22,7 +22,7 @@ pub const Context = opaque {
 
     /// zmq_ctx_shutdown
     pub fn deinit(ctx: *Context) void {
-        if (c.zmq_ctx_shutdown(ctx) != 0) unreachable; // user error: invalid context
+        if (c.zmq_ctx_term(ctx) != 0) unreachable; // user error: invalid context
     }
 
     /// zmq_socket
@@ -197,14 +197,17 @@ pub const Socket = opaque {
 
     /// zmq_close
     pub fn close(sock: *Socket) void {
-        if (c.zmq_close(sock) != 0) unreachable; // user error: sock was null
+        if (c.zmq_close(sock) != 0) {
+            // skill issue
+            // determine what to do here
+        }
     }
 
     // recurses to eintr loop
     /// zmq_setsockopt
-    pub fn setOption(sock: *Socket, opt: Option, value: ?*const anyopaque, len: usize) error{ IllegalValue, Terminated }!void {
+    pub fn setOption(sock: *Socket, opt: Option, value: ?*const anyopaque, len: usize) error{ NotSocket, IllegalValue, Terminated }!void {
         if (c.zmq_setsockopt(sock, @intFromEnum(opt), value, len) != 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket,
             c.EINVAL => error.IllegalValue,
             c.ETERM => error.Terminated,
             c.EINTR => @call(.always_tail, setOption, .{ sock, opt, value, len }),
@@ -214,9 +217,9 @@ pub const Socket = opaque {
 
     // recurses to eintr loop
     /// zmq_setsockopt
-    pub fn getOption(sock: *Socket, opt: Option, value: ?*anyopaque, len: usize) error{ IllegalValue, Terminated }!void {
+    pub fn getOption(sock: *Socket, opt: Option, value: ?*anyopaque, len: *usize) error{ NotSocket, IllegalValue, Terminated }!void {
         if (c.zmq_getsockopt(sock, @intFromEnum(opt), value, len) != 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket,
             c.EINVAL => error.IllegalValue,
             c.ETERM => error.Terminated,
             c.EINTR => @call(.always_tail, getOption, .{ sock, opt, value, len }),
@@ -226,9 +229,9 @@ pub const Socket = opaque {
 
     // recurses to eintr loop
     /// zmq_send
-    pub fn send(sock: *Socket, b: []const u8, options: SendRecvOptions) error{ WouldBlock, SocketTypeNotForSending, MultipartNotAllowed, IllegalState, Terminated, NotRoutable }!void {
+    pub fn send(sock: *Socket, b: []const u8, options: SendRecvOptions) error{ NotSocket, WouldBlock, SocketTypeNotForSending, MultipartNotAllowed, IllegalState, Terminated, NotRoutable }!void {
         if (c.zmq_send(sock, b.ptr, b.len, @bitCast(options)) != b.len) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket,
             c.EAGAIN => error.WouldBlock,
             c.ENOTSUP => error.SocketTypeNotForSending,
             c.EINVAL => error.MultipartNotAllowed,
@@ -242,10 +245,10 @@ pub const Socket = opaque {
 
     // recurses to eintr loop
     /// zmq_recv
-    pub fn recv(sock: *Socket, b: []u8, options: SendRecvOptions) error{ WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated }!usize {
+    pub fn recv(sock: *Socket, b: []u8, options: SendRecvOptions) error{ NotSocket, WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated }!usize {
         const res = c.zmq_recv(sock, b.ptr, b.len, @bitCast(options));
         return if (res >= 0) @intCast(res) else switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null.
+            c.ENOTSOCK => error.NotSocket,
             c.EAGAIN => error.WouldBlock,
             c.ENOTSUP => error.SocketTypeNotForReceiving,
             c.EFSM => error.IllegalState,
@@ -256,7 +259,7 @@ pub const Socket = opaque {
     }
 
     /// wraps recv with checking for the correct len
-    pub fn recvExact(sock: *Socket, b: []u8, options: SendRecvOptions) error{ WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated, Truncated, NotEnoughData }!void {
+    pub fn recvExact(sock: *Socket, b: []u8, options: SendRecvOptions) error{ NotSocket, WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated, Truncated, NotEnoughData }!void {
         const n = try sock.recv(b, options);
         if (n == b.len) {
             @branchHint(.likely);
@@ -272,9 +275,9 @@ pub const Socket = opaque {
     }
 
     /// zmq_bind
-    pub fn bindZ(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
+    pub fn bindZ(sock: *Socket, endpoint: [*:0]const u8) error{ NotSocket, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
         if (c.zmq_bind(sock, endpoint) != 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket,
             c.EINVAL => error.InvalidValue,
             c.EPROTONOSUPPORT => error.UnsupportedProtocol,
             c.ENOCOMPATPROTO => error.IncompatibleProtocol,
@@ -287,16 +290,16 @@ pub const Socket = opaque {
         };
     }
 
-    pub fn bind(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
+    pub fn bind(sock: *Socket, endpoint: []const u8, allocator: std.mem.Allocator) error{ NotSocket, OutOfMemory, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, AddressInUse, AddressNotAvailable, NonexistantInterface, Terminated, NoIoThread }!void {
         const formatted_endpoint = try allocator.dupeZ(u8, endpoint);
         defer allocator.free(formatted_endpoint);
         return bindZ(sock, formatted_endpoint);
     }
 
     /// zmq_connect
-    pub fn connectZ(sock: *Socket, endpoint: [*:0]const u8) error{ InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
+    pub fn connectZ(sock: *Socket, endpoint: [*:0]const u8) error{ NotSocket, InvalidValue, UnsupportedProtocol, IncompatibleProtocol, Terminated, NoIoThread }!void {
         if (c.zmq_connect(sock, endpoint) != 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket,
             c.EINVAL => error.InvalidValue,
             c.EPROTONOSUPPORT => error.UnsupportedProtocol,
             c.ENOCOMPATPROTO => error.IncompatibleProtocol,
@@ -315,14 +318,16 @@ pub const Socket = opaque {
     /// Returns the number of frames discarded.
     pub fn discardRemainingFrames(sock: *Socket, options: SendRecvOptions) !usize {
         var nb_discarded: usize = 0;
+        var len : usize = @sizeOf(c_int);
         var has_more: c_int = undefined;
-        try sock.getOption(.rcvmore, &has_more, @sizeOf(c_int));
+
+        try sock.getOption(.rcvmore, &has_more, &len);
         while (has_more != 0) {
             var m = Message.init();
             defer m.deinit();
             try m.recv(sock, options);
-            try sock.getOption(.rcvmore, &has_more, @sizeOf(c_int));
             nb_discarded += 1;
+            if (m.hasMore()) break;
         }
         return nb_discarded;
     }
@@ -378,15 +383,19 @@ pub const Message = extern struct {
         return @ptrCast(c.zmq_msg_data(&m.i));
     }
 
+    pub fn hasMore(m: *Message) bool {
+        return c.zmq_msg_more(&m.i) != 0;
+    }
+
     pub fn deinit(m: *Message) void {
         if (c.zmq_msg_close(&m.i) != 0) unreachable;
     }
 
     // recurses to eintr loop
     /// zmq_msg_send
-    pub fn send(m: *Message, sock: *Socket, options: Socket.SendRecvOptions) error{ WouldBlock, SocketTypeNotForSending, MultipartNotAllowed, IllegalState, Terminated, NotRoutable }!void {
+    pub fn send(m: *Message, sock: *Socket, options: Socket.SendRecvOptions) error{ NotSocket, WouldBlock, SocketTypeNotForSending, MultipartNotAllowed, IllegalState, Terminated, NotRoutable }!void {
         if (c.zmq_msg_send(&m.i, sock, @bitCast(options)) != 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket, // user error: sock was null
             c.EFAULT => unreachable, // user error: message was invalid
             c.EAGAIN => error.WouldBlock,
             c.ENOTSUP => error.SocketTypeNotForSending,
@@ -401,9 +410,9 @@ pub const Message = extern struct {
 
     // recurses to eintr loop
     /// zmq_msg_recv
-    pub fn recv(m: *Message, sock: *Socket, options: Socket.SendRecvOptions) error{ WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated }!void {
+    pub fn recv(m: *Message, sock: *Socket, options: Socket.SendRecvOptions) error{ NotSocket, WouldBlock, SocketTypeNotForReceiving, IllegalState, Terminated }!void {
         if (c.zmq_msg_recv(&m.i, sock, @bitCast(options)) == 0) return switch (c.zmq_errno()) {
-            c.ENOTSOCK => unreachable, // user error: sock was null
+            c.ENOTSOCK => error.NotSocket, // user error: sock was null
             c.EFAULT => unreachable, // user error: message was invalid
             c.EAGAIN => error.WouldBlock,
             c.ENOTSUP => error.SocketTypeNotForReceiving,

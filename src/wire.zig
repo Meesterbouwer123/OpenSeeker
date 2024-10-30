@@ -86,10 +86,10 @@ pub const Host = extern struct {
 
 pub const Range = extern struct {
     prefix: Ip align(1),
-    mask: u8,
+    msbs: u8,
 
     pub fn isValid(r: Range) bool {
-        return r.mask <= 32;
+        return r.msbs <= 32;
     }
 
     pub fn fromString(str: []const u8) error{ IllegalIp, IllegalMask, MissingMask }!Host {
@@ -101,7 +101,7 @@ pub const Range = extern struct {
     }
 
     pub fn format(v: Range, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("{}/{d}", .{ v.ip, v.mask });
+        try writer.print("{}/{d}", .{ v.ip, v.msbs });
     }
 };
 

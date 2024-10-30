@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS pending_discovery (
 
 CREATE INDEX IF NOT EXISTS idx_pending_discovery_priority ON pending_discovery (priority DESC);
 
+CREATE TABLE IF NOT EXISTS running_discovery (
+    prefix INT NOT NULL CHECK(prefix >= 0 AND prefix < 1 << 32 AND prefix & (0xffffffff >> msbs) == 0),
+    msbs INT NOT NULL CHECK(msbs >= 0 AND msbs <= 32),
+    timestamp INT NOT NULL,
+    packets_per_sec INT NOT NULL,
+    PRIMARY KEY(prefix, msbs)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS pending_ping (
     ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
     port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
@@ -28,10 +36,26 @@ CREATE TABLE IF NOT EXISTS pending_ping (
 
 CREATE INDEX IF NOT EXISTS idx_pending_ping_priority ON pending_ping (priority DESC);
 
+CREATE TABLE IF NOT EXISTS running_ping (
+    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
+    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
+    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
+    timestamp INT NOT NULL,
+    PRIMARY KEY(ip, port)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS pending_legacy (
     ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
     port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
     priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
+    PRIMARY KEY(ip, port)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS running_legacy (
+    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
+    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
+    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
+    timestamp INT NOT NULL,
     PRIMARY KEY(ip, port)
 ) STRICT;
 
@@ -41,6 +65,14 @@ CREATE TABLE IF NOT EXISTS pending_join (
     ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
     port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
     priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
+    PRIMARY KEY(ip, port)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS running_join (
+    ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
+    port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
+    priority INT NOT NULL CHECK(priority >= 0 AND priority < 1 << 8),
+    timestamp INT NOT NULL,
     PRIMARY KEY(ip, port)
 ) STRICT;
 
@@ -103,7 +135,7 @@ CREATE TABLE IF NOT EXISTS successful_legacy_pings (
     timestamp INT NOT NULL,
     max_players INT NOT NULL,
     current_players INT NOT NULL,
-    description TEXT NOT NULL,
+    motd TEXT NOT NULL,
     FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
 ) STRICT;
 
@@ -111,6 +143,7 @@ CREATE TABLE IF NOT EXISTS failed_joins (
     ip INT NOT NULL CHECK(ip >= 0 AND ip < 1 << 32),
     port INT NOT NULL CHECK(port >= 0 AND port < 1 << 16),
     timestamp INT NOT NULL,
+    reason INT NOT NULL,
     FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
 ) STRICT;
 

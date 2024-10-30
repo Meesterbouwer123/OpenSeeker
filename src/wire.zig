@@ -112,7 +112,6 @@ pub const DiscoveryRequest = extern struct {
     },
     packets_per_sec: u32 align(1),
     previous_range: Range,
-    previous_duration_ms: u32 align(1),
 };
 
 pub const SlpRequest = extern struct {
@@ -143,6 +142,41 @@ pub const AnnounceHeader = extern struct {
 
     version: Version,
     kind: Kind,
+};
+
+pub const StatusHeader = extern struct {
+    pub const Version = enum(u8) {
+        latest = '1',
+        _,
+    };
+
+    pub const Kind = enum(u8) {
+        discovery = 'd',
+
+        legacy_success = 'l',
+        legacy_failure = 'L',
+
+        ping_success = 'p',
+        ping_failure = 'P',
+
+        join_success = 'j',
+        join_failure = 'J',
+
+        _,
+    };
+
+    version: Version,
+    kind: Kind,
+};
+
+pub const LegacySuccessHeader = extern struct {
+    max_players: u32,
+    current_players: u32,
+};
+
+pub const PingSuccessHeader = extern struct {
+    max_players: u32,
+    current_players: u32,
 };
 
 pub const ApiHeader = extern struct {

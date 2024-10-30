@@ -77,11 +77,11 @@ pub const Announce = struct {
         }
     }
 
-    pub fn handleDiscoveryRequest(announce: *Announce, subnets_to_scan: anytype, excluded_ranges: anytype, delete_discovery_subnet: anytype) !void {
+    pub fn handleDiscoveryRequest(announce: *Announce, get_discovery: anytype, excluded_ranges: anytype, finish_discovery: anytype) !void {
         const discovery_request = try wire.recv(wire.DiscoveryRequest, announce.socket, .{});
 
         if (!discovery_request.flags.is_first_request) {
-            try delete_discovery_subnet.exec(
+            try finish_discovery.exec(
                 .{},
                 .{
                     .prefix = discovery_request.previous_range.prefix,
@@ -90,7 +90,7 @@ pub const Announce = struct {
             );
         }
 
-        const new_range = try subnets_to_scan.one(wire.Range, .{}, .{ .limit = 1 });
+        const new_range = try get_discovery.one(wire.Range, .{}, .{ .limit = 1 });
 
         var alist: std.ArrayListUnmanaged(wire.Range) = .{};
         defer alist.deinit(std.heap.c_allocator);
@@ -119,31 +119,32 @@ pub const Announce = struct {
         try announce.socket.send(std.mem.sliceAsBytes(excluded), .{ .sndmore = true });
     }
 
-    pub fn worker(announce: *Announce) void {
-        const state: *State = @fieldParentPtr("announce", announce);
-        var hosts_to_legacy = state.db.prepare("SELECT ip, port FROM pending_legacy ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
-        var hosts_to_slp = state.db.prepare("SELECT ip, port FROM pending_ping ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
-        var hosts_to_join = state.db.prepare("SELECT ip, port FROM pending_join ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
-        var subnets_to_scan = state.db.prepare("SELECT prefix, msbs FROM pending_discovery ORDER BY priority DESC LIMIT ?") catch @panic("bruh");
-        var delete_discovery_subnet = state.db.prepare("DELETE FROM pending_discovery WHERE prefix = ? and msbs = ?") catch @panic("bruh");
+    pub fn worker(state: *State) void {
+        var get_discovery = state.db.prepare(@embedFile("sql/get_discovery.sql")) catch @panic("bruh");
+        var finish_discovery = state.db.prepare(@embedFile("sql/finish_discovery.sql")) catch @panic("bruh");
+        var get_legacy = state.db.prepare(@embedFile("sql/get_legacy.sql")) catch @panic("bruh");
+        var get_ping = state.db.prepare(@embedFile("sql/get_ping.sql")) catch @panic("bruh");
+        var get_join = state.db.prepare(@embedFile("sql/get_join.sql")) catch @panic("bruh");
         var excluded_ranges = state.db.prepare(@embedFile("sql/excluded_ranges.sql")) catch @panic("bruh");
 
         while (true) {
-            hosts_to_legacy.reset();
-            hosts_to_slp.reset();
-            hosts_to_join.reset();
-            subnets_to_scan.reset();
+            get_discovery.reset();
+            get_legacy.reset();
+            get_ping.reset();
+            get_join.reset();
             excluded_ranges.reset();
 
             discard: {
-                const nb_discarded = announce.socket.discardRemainingFrames(.{}) catch |err| {
+                const nb_discarded = state.announce.socket.discardRemainingFrames(.{}) catch |err| {
+                    if (err == error.NotSocket) return;
                     log.warn("discarding: {s}", .{@errorName(err)});
                     break :discard;
                 };
                 if (nb_discarded != 0) log.warn("{d} frames discarded", .{nb_discarded});
             }
 
-            const header = wire.recv(wire.AnnounceHeader, announce.socket, .{}) catch |err| switch (err) {
+            const header = wire.recv(wire.AnnounceHeader, state.announce.socket, .{}) catch |err| switch (err) {
+                error.NotSocket => return,
                 error.Terminated => return,
                 else => {
                     log.warn("header recv error {s}", .{@errorName(err)});
@@ -157,12 +158,12 @@ pub const Announce = struct {
             }
 
             const res = switch (header.kind) {
-                .slp => handleSlpRequest(announce, &hosts_to_legacy, &hosts_to_slp, &hosts_to_join),
-                .discovery => handleDiscoveryRequest(announce, &subnets_to_scan, &excluded_ranges, &delete_discovery_subnet),
+                .slp => state.announce.handleSlpRequest(&get_legacy, &get_ping, &get_join),
+                .discovery => state.announce.handleDiscoveryRequest(&get_discovery, &excluded_ranges, &finish_discovery),
 
                 _ => |k| {
                     log.warn("incorrect kind {d}", .{@intFromEnum(k)});
-                    wire.send({}, announce.socket, .{}) catch {};
+                    wire.send({}, state.announce.socket, .{}) catch {};
                     continue;
                 },
             };
@@ -177,18 +178,153 @@ pub const Announce = struct {
     }
 };
 
+pub const Collect = struct {
+    socket: *zmq.Socket,
+    thread: std.Thread,
+
+    const log = std.log.scoped(.collect);
+
+    fn handleDiscovery(collect: *Collect, new_discovery: anytype) !void {
+        const discovered_host = try wire.recv(wire.Host, collect.Socket, .{});
+        try new_discovery.exec(.{}, .{
+            .ip = discovered_host.ip,
+            .port = discovered_host.port,
+            .timestamp = try std.time.timestamp(),
+            .priority = 10,
+        });
+    }
+
+    fn handleLegacySuccess(collect: *Collect, success_legacy: anytype) !void {
+        const discovered_host = try wire.recv(wire.Host, collect.socket, .{});
+        const h = try wire.recv(wire.LegacySuccessHeader, collect.socket, .{});
+
+        var m = zmq.Message.init();
+        try m.recv(collect.socket, .{});
+        defer m.deinit();
+
+        try success_legacy.exec(.{}, .{
+            .ip = discovered_host.ip,
+            .port = discovered_host.port,
+            .timestamp = try std.time.timestamp(),
+            .max_players = h.max_players,
+            .current_players = h.current_players,
+            .motd = m.data(),
+        });
+    }
+
+    fn handlePingSuccess(collect: *Collect, success_legacy: anytype) !void {
+        const discovered_host = try wire.recv(wire.Host, collect.socket, .{});
+        const h = try wire.recv(wire.PingSuccessHeader, collect.socket, .{});
+
+        var m = zmq.Message.init();
+        try m.recv(collect.socket, .{});
+        defer m.deinit();
+
+        try success_legacy.exec(.{}, .{
+            .ip = discovered_host.ip,
+            .port = discovered_host.port,
+            .timestamp = try std.time.timestamp(),
+            .max_players = h.max_players,
+            .current_players = h.current_players,
+            .motd = m.data(),
+        });
+    }
+
+    fn handleFailure(collect: *Collect, failure: anytype) !void {
+        const host = try wire.recv(wire.Host, collect.socket, .{});
+
+        try failure.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = try std.time.timestamp(),
+        });
+    }
+
+    pub fn worker(state: *State) void {
+        var new_discovery = state.db.prepare(@embedFile("sql/new_discovery.sql")) catch @panic("bruh");
+        var success_legacy = state.db.prepare(@embedFile("sql/success_legacy.sql")) catch @panic("bruh");
+        var failure_legacy = state.db.prepare(@embedFile("sql/failure_legacy.sql")) catch @panic("bruh");
+        var success_ping = state.db.prepare(@embedFile("sql/success_ping.sql")) catch @panic("bruh");
+        var failure_ping = state.db.prepare(@embedFile("sql/failure_ping.sql")) catch @panic("bruh");
+        var success_join = state.db.prepare(@embedFile("sql/success_join.sql")) catch @panic("bruh");
+        var failure_join = state.db.prepare(@embedFile("sql/failure_join.sql")) catch @panic("bruh");
+        var favicon = state.db.prepare(@embedFile("sql/favicon.sql")) catch @panic("bruh");
+
+        while (true) {
+            new_discovery.reset();
+            success_legacy.reset();
+            failure_legacy.reset();
+            success_ping.reset();
+            failure_ping.reset();
+            success_join.reset();
+            failure_join.reset();
+            favicon.reset();
+
+            discard: {
+                const nb_discarded = state.collect.socket.discardRemainingFrames(.{}) catch |err| {
+                    if (err == error.NotSocket) return;
+                    log.warn("discarding: {s}", .{@errorName(err)});
+                    break :discard;
+                };
+                if (nb_discarded != 0) log.warn("{d} frames discarded", .{nb_discarded});
+            }
+
+            const header = wire.recv(wire.StatusHeader, state.collect.socket, .{}) catch continue;
+
+            if (header.version != .latest) {
+                log.warn("incorrect version {d}", .{@intFromEnum(header.version)});
+                continue;
+            }
+
+            const res = switch (header.kind) {
+                .discovery => handleDiscovery(&state.collect, &new_discovery),
+
+                .legacy_success => handleLegacySuccess(&state.collect, &success_legacy),
+                .legacy_failure => handleFailure(&state.collect, &failure_legacy),
+
+                .ping_success => handlePingSuccess(&state.collect, &ping_success),
+                .ping_failure => handleFailure(&state.collect, &failure_ping),
+
+                .join_success => handleJoinSuccess(&state.collect, &join_success),
+                .join_failure => handleFailure(&state.collect, &failure_join),
+
+                _ => |k| {
+                    log.warn("incorrect kind {d}", .{@intFromEnum(k)});
+                    wire.send({}, state.collect.socket, .{}) catch {};
+                    continue;
+                },
+            };
+            res catch |err| switch (err) {
+                error.Terminated => return,
+                else => {
+                    log.warn("handling error {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+        }
+    }
+};
+
+pub const Api = struct {
+    socket: *zmq.Socket,
+    thread: std.Thread,
+
+    const log = std.log.scoped(.api);
+
+    pub fn worker(state: *State) void {
+        _ = state; // autofix
+
+    }
+};
+
 pub const State = struct {
     config: Config,
     ctx: *zmq.Context,
     db: sqlite.Db,
 
     announce: Announce,
-
-    collect: *zmq.Socket,
-    collect_thread: std.Thread,
-
-    api: *zmq.Socket,
-    api_thread: std.Thread,
+    collect: Collect,
+    api: Api,
 
     arena: std.heap.ArenaAllocator,
 
@@ -250,29 +386,35 @@ pub const State = struct {
             .socket = announce,
             .thread = undefined,
         };
-        state.collect = collect;
-        state.api = api;
+        state.collect = .{
+            .socket = collect,
+            .thread = undefined,
+        };
+        state.api = .{
+            .socket = api,
+            .thread = undefined,
+        };
 
         state.announce.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
             Announce.worker,
-            .{&state.announce},
+            .{state},
         );
         errdefer state.announce.thread.detach(); // thread will terminate on its own due to error.Terminated
 
-        state.api_thread = try std.Thread.spawn(
+        state.api.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
-            apiWorker,
+            Api.worker,
             .{state},
         );
-        errdefer state.api_thread.detach(); // thread will terminate on its own due to error.Terminated
+        errdefer state.api.thread.detach(); // thread will terminate on its own due to error.Terminated
 
-        state.collect_thread = try std.Thread.spawn(
+        state.collect.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
-            collectWorker,
+            Collect.worker,
             .{state},
         );
-        errdefer state.collect_thread.detach(); // thread will terminate on its own due to error.Terminated
+        errdefer state.collect.thread.detach(); // thread will terminate on its own due to error.Terminated
     }
 
     pub fn deinit(state: *State) void {
@@ -292,14 +434,6 @@ pub const State = struct {
         state.announce.thread.join();
         state.collect_thread.join();
         state.api_thread.join();
-    }
-
-    fn collectWorker(state: *State) void {
-        _ = state;
-    }
-
-    fn apiWorker(state: *State) void {
-        _ = state;
     }
 };
 

@@ -185,17 +185,17 @@ pub const Collect = struct {
     const log = std.log.scoped(.collect);
 
     fn handleDiscovery(collect: *Collect, new_discovery: anytype) !void {
-        const discovered_host = try wire.recv(wire.Host, collect.Socket, .{});
+        const discovered_host = try wire.recv(wire.Host, collect.socket, .{});
         try new_discovery.exec(.{}, .{
             .ip = discovered_host.ip,
             .port = discovered_host.port,
-            .timestamp = try std.time.timestamp(),
+            .timestamp = std.time.timestamp(),
             .priority = 10,
         });
     }
 
     fn handleLegacySuccess(collect: *Collect, success_legacy: anytype) !void {
-        const discovered_host = try wire.recv(wire.Host, collect.socket, .{});
+        const host = try wire.recv(wire.Host, collect.socket, .{});
         const h = try wire.recv(wire.LegacySuccessHeader, collect.socket, .{});
 
         var m = zmq.Message.init();
@@ -203,31 +203,23 @@ pub const Collect = struct {
         defer m.deinit();
 
         try success_legacy.exec(.{}, .{
-            .ip = discovered_host.ip,
-            .port = discovered_host.port,
-            .timestamp = try std.time.timestamp(),
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
             .max_players = h.max_players,
             .current_players = h.current_players,
             .motd = m.data(),
         });
     }
 
-    fn handlePingSuccess(collect: *Collect, success_legacy: anytype) !void {
-        const discovered_host = try wire.recv(wire.Host, collect.socket, .{});
-        const h = try wire.recv(wire.PingSuccessHeader, collect.socket, .{});
+    fn handlePingSuccess(collect: *Collect, success_ping: anytype) !void {
+        _ = collect; // autofix
+        _ = success_ping; // autofix
+    }
 
-        var m = zmq.Message.init();
-        try m.recv(collect.socket, .{});
-        defer m.deinit();
-
-        try success_legacy.exec(.{}, .{
-            .ip = discovered_host.ip,
-            .port = discovered_host.port,
-            .timestamp = try std.time.timestamp(),
-            .max_players = h.max_players,
-            .current_players = h.current_players,
-            .motd = m.data(),
-        });
+    fn handleJoinSuccess(collect: *Collect, success_join: anytype) !void {
+        _ = collect; // autofix
+        _ = success_join; // autofix
     }
 
     fn handleFailure(collect: *Collect, failure: anytype) !void {
@@ -236,9 +228,20 @@ pub const Collect = struct {
         try failure.exec(.{}, .{
             .ip = host.ip,
             .port = host.port,
-            .timestamp = try std.time.timestamp(),
+            .timestamp = std.time.timestamp(),
         });
     }
+
+    fn handleJoinFailure(collect: *Collect, failure: anytype) !void {
+        const host = try wire.recv(wire.Host, collect.socket, .{});
+
+        try failure.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
+        });
+    }
+
 
     pub fn worker(state: *State) void {
         var new_discovery = state.db.prepare(@embedFile("sql/new_discovery.sql")) catch @panic("bruh");
@@ -282,10 +285,10 @@ pub const Collect = struct {
                 .legacy_success => handleLegacySuccess(&state.collect, &success_legacy),
                 .legacy_failure => handleFailure(&state.collect, &failure_legacy),
 
-                .ping_success => handlePingSuccess(&state.collect, &ping_success),
+                .ping_success => handlePingSuccess(&state.collect, &success_ping),
                 .ping_failure => handleFailure(&state.collect, &failure_ping),
 
-                .join_success => handleJoinSuccess(&state.collect, &join_success),
+                .join_success => handleJoinSuccess(&state.collect, &success_join),
                 .join_failure => handleFailure(&state.collect, &failure_join),
 
                 _ => |k| {
@@ -418,8 +421,8 @@ pub const State = struct {
     }
 
     pub fn deinit(state: *State) void {
-        state.api.close();
-        state.collect.close();
+        state.api.socket.close();
+        state.collect.socket.close();
         state.announce.socket.close();
 
         state.ctx.deinit();
@@ -432,8 +435,8 @@ pub const State = struct {
 
     pub fn join(state: *State) void {
         state.announce.thread.join();
-        state.collect_thread.join();
-        state.api_thread.join();
+        state.collect.thread.join();
+        state.api.thread.join();
     }
 };
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const zmq = @import("zmq.zig");
+const zmq = @import("zmq");
 
 comptime {
     if (@import("builtin").cpu.arch.endian() != .little) @compileError("little endian is required for now");
@@ -28,6 +28,38 @@ pub fn recv(comptime T: type, sock: *zmq.Socket, options: zmq.Socket.SendRecvOpt
     try sock.recvExact(std.mem.asBytes(&v), options);
     return v;
 }
+
+pub fn recvM(comptime T: type, m: *zmq.Message) !T {
+    var v: T = undefined;
+    const b = std.mem.asBytes(&v);
+    const d = m.data();
+    if (d.len == b.len) {
+        @branchHint(.likely);
+        @memcpy(b, d);
+        return v;
+    } else if (d.len < b.len) {
+        @branchHint(.unlikely);
+        return error.NotEnoughData;
+    } else {
+        @branchHint(.unlikely);
+        return error.Truncated;
+    }
+}
+
+pub fn recvMP(comptime T: type, m: *zmq.Message) !*T {
+    const d = m.data();
+    if (d.len == @sizeOf(T)) {
+        @branchHint(.likely);
+        return @ptrCast(d.ptr);
+    } else if (d.len < @sizeOf(T)) {
+        @branchHint(.unlikely);
+        return error.NotEnoughData;
+    } else {
+        @branchHint(.unlikely);
+        return error.Truncated;
+    }
+}
+
 
 pub const Ip = packed union {
     i: u32,
@@ -107,7 +139,8 @@ pub const Range = extern struct {
 
 pub const DiscoveryRequest = extern struct {
     flags: packed struct {
-        padding: u7 = 0,
+        padding: u6 = 0,
+        is_exiting: bool,
         is_first_request: bool,
     },
     packets_per_sec: u32 align(1),
@@ -170,13 +203,13 @@ pub const StatusHeader = extern struct {
 };
 
 pub const LegacySuccessHeader = extern struct {
-    max_players: u32,
-    current_players: u32,
+    max_players: u32 align(1),
+    current_players: u32 align(1),
 };
 
 pub const PingSuccessHeader = extern struct {
-    max_players: u32,
-    current_players: u32,
+    max_players: u32 align(1),
+    current_players: u32 align(1),
 };
 
 pub const ApiHeader = extern struct {

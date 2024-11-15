@@ -1,1 +1,1 @@
-INSERT INTO favicons VALUES (?) RETURNING _rowid_;
+INSERT OR IGNORE INTO favicons (data) VALUES ($d) RETURNING id;

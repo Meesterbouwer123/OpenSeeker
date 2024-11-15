@@ -1,5 +1,6 @@
 const std = @import("std");
-const zmq = @import("zmq.zig");
+const zmq = @import("zmq");
+
 pub fn main() !void {
     var seed: [std.crypto.dh.X25519.seed_length]u8 = undefined;
     std.crypto.random.bytes(&seed);

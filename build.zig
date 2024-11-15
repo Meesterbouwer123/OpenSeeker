@@ -12,10 +12,30 @@ fn obj(b: *std.Build, path: []const u8, target: std.Build.ResolvedTarget, optimi
     return o;
 }
 
+fn linkZmq(b: *std.Build, exe: *std.Build.Step.Compile, vendor: bool, target: std.Build.ResolvedTarget) void {
+    if (vendor) {
+        const dep = b.lazyDependency(
+            "libzmq",
+            .{
+                .target = target,
+                .release = true,
+                .vendor_sodium = true,
+                .curve = true,
+                .sodium = true,
+                .shared = false,
+            },
+        ) orelse return;
+        exe.linkLibrary(dep.artifact("zmq"));
+    } else {
+        exe.linkSystemLibrary("zmq");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
     const linkage = b.option(std.builtin.LinkMode, "linkage", "How to link, defaults to dynamic") orelse .dynamic;
+    const vendor_libzmq = b.option(bool, "vendor_libzmq", "vendor libzmq and libsodium (true)") orelse true;
 
     const sqlite = b.dependency("sqlite", .{
         .target = target,
@@ -41,6 +61,8 @@ pub fn build(b: *std.Build) void {
     // });
     // masscan_parser_shared.addObject(list_parser);
 
+    const zlzmq = b.dependency("zlzmq", .{}).module("zlzmq");
+
     const test_masscan_parser = b.addTest(.{
         .name = "test_masscan_parser",
         .root_source_file = b.path("src/test_masscan_parser.zig"),
@@ -60,7 +82,8 @@ pub fn build(b: *std.Build) void {
         .linkage = linkage,
     });
     discovery.addIncludePath(b.path("src"));
-    discovery.linkSystemLibrary("zmq");
+    discovery.root_module.addImport("zmq", zlzmq);
+    linkZmq(b, discovery, vendor_libzmq, target);
 
     const manager = b.addExecutable(.{
         .name = "manager",
@@ -70,7 +93,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .linkage = linkage,
     });
-    manager.linkSystemLibrary("zmq");
+    manager.root_module.addImport("zmq", zlzmq);
+    linkZmq(b, manager, vendor_libzmq, target);
     manager.root_module.addImport("sqlite", sqlite.module("sqlite"));
     manager.linkLibrary(sqlite.artifact("sqlite"));
 
@@ -82,7 +106,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .linkage = linkage,
     });
-    gen_keypair.linkSystemLibrary("zmq");
+    gen_keypair.root_module.addImport("zmq", zlzmq);
+    linkZmq(b, gen_keypair, vendor_libzmq, target);
 
     b.installArtifact(discovery);
     b.installArtifact(manager);

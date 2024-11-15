@@ -1,5 +1,5 @@
 const std = @import("std");
-const zmq = @import("zmq.zig");
+const zmq = @import("zmq");
 const wire = @import("wire.zig");
 const conf = @import("conf.zig");
 

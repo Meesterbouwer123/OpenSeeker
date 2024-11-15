@@ -1,0 +1,1 @@
+INSERT OR IGNORE INTO favicons (data) VALUES ($d) RETURNING id;

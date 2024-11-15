@@ -1,8 +1,33 @@
 const std = @import("std");
-const zmq = @import("zmq.zig");
+const zmq = @import("zmq");
 const wire = @import("wire.zig");
 const conf = @import("conf.zig");
 const sqlite = @import("sqlite");
+
+const MultipartMessage = std.ArrayListUnmanaged(zmq.Message);
+
+pub fn recvAll(s: *zmq.Socket, ally: std.mem.Allocator) !MultipartMessage {
+    var fm: MultipartMessage = .{};
+    errdefer deinitAll(&fm, ally);
+
+    var more = true;
+    while (more) {
+        var m = try fm.addOne(ally);
+        errdefer _ = fm.pop();
+
+        m.* = zmq.Message.init();
+        errdefer m.deinit();
+
+        try m.recv(s, .{});
+        more = m.hasMore();
+    }
+    return fm;
+}
+
+pub fn deinitAll(m: *MultipartMessage, ally: std.mem.Allocator) void {
+    for (m.items) |*ms| ms.deinit();
+    m.deinit(ally);
+}
 
 const Config = struct {
     db_path: []const u8 = "openseeker_manager.sqlite3",
@@ -15,27 +40,380 @@ const Config = struct {
 
     /// The api REP endpoint, where clients can send queries, and where administrators and users can manipulate the database (query format: TBD).
     api: []const u8 = "tcp://127.0.0.1:35003",
-    api_curve_privkey: ?[]const u8 = null,
-    query_curve_allowed_pubkey: ?[]const u8 = null,
-
-    control_curve_admin_pubkey: ?[]const u8 = null,
+    api_curve_secret_key: ?[]const u8 = null,
+    query_curve_allowed_public_key: ?[]const u8 = null,
+    control_curve_admin_public_key: ?[]const u8 = null,
     // maybe we want an array of allowed public keys? or we just use a token... but that provides
     // fewer guarantees
-    control_curve_allowed_pubkey: ?[]const u8 = null,
+    control_curve_allowed_public_key: ?[]const u8 = null,
+};
+
+pub const Announce = struct {
+    socket: *zmq.Socket,
+    thread: std.Thread,
+    arena: std.heap.ArenaAllocator,
+
+    const log = std.log.scoped(.announce);
+
+    fn sendHosts(announce: *Announce, iter: anytype, alist: *std.ArrayListUnmanaged(wire.Host), rheader: wire.SlpResponseHeader, options: zmq.Socket.SendRecvOptions) !void {
+        while (try iter.next(.{})) |host| {
+            try alist.append(std.heap.c_allocator, host);
+        }
+
+        const buf = try alist.toOwnedSlice(std.heap.c_allocator);
+        errdefer std.heap.c_allocator.free(buf);
+        try wire.send(rheader, announce.socket, .{ .sndmore = true });
+
+        var m = try zmq.Message.initOwned(std.mem.sliceAsBytes(buf), wire.wireFree, null);
+        try m.send(announce.socket, options);
+    }
+
+    fn handleSlpRequest(announce: *Announce, slp_req_m: *zmq.Message, hosts_to_legacy: anytype, hosts_to_slp: anytype, hosts_to_join: anytype) !void {
+        const slp_req = try wire.recvMP(wire.SlpRequest, slp_req_m);
+
+        if (slp_req.preferred_bucket_size < 3) {
+            const host = try hosts_to_legacy.one(wire.Host, .{}, .{ .limit = 1 });
+            const rheader: wire.SlpResponseHeader = .{ .task = .legacy };
+
+            try wire.send(rheader, announce.socket, .{ .sndmore = true });
+            try wire.send(host, announce.socket, .{});
+        } else {
+            const nb_hosts_per_bucket = slp_req.preferred_bucket_size;
+
+            var alist: std.ArrayListUnmanaged(wire.Host) = .{};
+            defer alist.deinit(std.heap.c_allocator);
+
+            {
+                try alist.ensureUnusedCapacity(std.heap.c_allocator, nb_hosts_per_bucket);
+                var legacy_iter = try hosts_to_legacy.iterator(wire.Host, .{ .limit = nb_hosts_per_bucket });
+                try announce.sendHosts(&legacy_iter, &alist, .{ .task = .legacy }, .{ .sndmore = true });
+            }
+
+            {
+                try alist.ensureUnusedCapacity(std.heap.c_allocator, nb_hosts_per_bucket);
+                var slp_iter = try hosts_to_slp.iterator(wire.Host, .{ .limit = nb_hosts_per_bucket });
+                try announce.sendHosts(&slp_iter, &alist, .{ .task = .slp }, .{ .sndmore = true });
+            }
+
+            {
+                try alist.ensureUnusedCapacity(std.heap.c_allocator, nb_hosts_per_bucket);
+                var join_iter = try hosts_to_join.iterator(wire.Host, .{ .limit = nb_hosts_per_bucket });
+                try announce.sendHosts(&join_iter, &alist, .{ .task = .join }, .{});
+            }
+        }
+    }
+
+    pub fn handleDiscoveryRequest(announce: *Announce, dis_req: *zmq.Message, get_discovery: anytype, excluded_ranges: anytype, finish_discovery: anytype) !void {
+        const discovery_request = try wire.recvMP(wire.DiscoveryRequest, dis_req);
+
+        if (!discovery_request.flags.is_first_request) {
+            try finish_discovery.exec(
+                .{},
+                .{
+                    .prefix = discovery_request.previous_range.prefix,
+                    .msbs = discovery_request.previous_range.msbs,
+                },
+            );
+        }
+
+        const new_range = try get_discovery.one(wire.Range, .{}, .{ .limit = 1 });
+
+        var alist: std.ArrayListUnmanaged(wire.Range) = .{};
+        defer alist.deinit(std.heap.c_allocator);
+
+        {
+            const range_to_search: wire.Range = if (discovery_request.flags.is_first_request)
+                .{ .prefix = wire.Ip{ .i = 0 }, .msbs = 0 }
+            else
+                .{
+                    .prefix = discovery_request.previous_range.prefix,
+                    .msbs = discovery_request.previous_range.msbs,
+                };
+            var exclude_iter = try excluded_ranges.iterator(
+                wire.Range,
+                range_to_search,
+            );
+
+            while (try exclude_iter.next(.{})) |range| {
+                try alist.append(std.heap.c_allocator, range);
+            }
+        }
+
+        const excluded = try alist.toOwnedSlice(std.heap.c_allocator);
+
+        try announce.socket.send(std.mem.asBytes(&new_range), .{ .sndmore = true });
+        var m = try zmq.Message.initOwned(std.mem.sliceAsBytes(excluded), wire.wireFree, null);
+        try m.send(announce.socket, .{});
+    }
+
+    pub fn worker(state: *State) void {
+        var get_discovery = state.db.prepareDynamic(@embedFile("sql/get_discovery.sql")) catch @panic("bruh");
+        var finish_discovery = state.db.prepareDynamic(@embedFile("sql/finish_discovery.sql")) catch @panic("bruh");
+        var get_legacy = state.db.prepareDynamic(@embedFile("sql/get_legacy.sql")) catch @panic("bruh");
+        var get_ping = state.db.prepareDynamic(@embedFile("sql/get_ping.sql")) catch @panic("bruh");
+        var get_join = state.db.prepareDynamic(@embedFile("sql/get_join.sql")) catch @panic("bruh");
+        var excluded_ranges = state.db.prepareDynamic(@embedFile("sql/excluded_ranges.sql")) catch @panic("bruh");
+
+        while (true) {
+            get_discovery.reset();
+            get_legacy.reset();
+            get_ping.reset();
+            get_join.reset();
+            excluded_ranges.reset();
+            _ = state.announce.arena.reset(.{ .retain_with_limit = 4 << 20 });
+
+            var fm = recvAll(state.announce.socket, state.announce.arena.allocator()) catch |err| switch (err) {
+                error.NotSocket => return,
+                error.Terminated => return,
+                else => {
+                    log.warn("recv error {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+            defer deinitAll(&fm, state.announce.arena.allocator());
+
+            if (fm.items.len != 2) {
+                log.warn("discarded {d} messages", .{fm.items.len});
+                continue;
+            }
+
+            const header = wire.recvMP(wire.AnnounceHeader, &fm.items[0]) catch continue;
+
+            if (header.version != .latest) {
+                log.warn("incorrect version {d}", .{@intFromEnum(header.version)});
+                continue;
+            }
+
+            const res = switch (header.kind) {
+                .slp => state.announce.handleSlpRequest(&fm.items[1], &get_legacy, &get_ping, &get_join),
+                .discovery => state.announce.handleDiscoveryRequest(&fm.items[1], &get_discovery, &excluded_ranges, &finish_discovery),
+
+                _ => |k| {
+                    log.warn("incorrect kind {d}", .{@intFromEnum(k)});
+                    wire.send({}, state.announce.socket, .{}) catch {};
+                    continue;
+                },
+            };
+            res catch |err| switch (err) {
+                error.Terminated => return,
+                else => {
+                    log.warn("handling error {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+        }
+    }
+};
+
+pub const Collect = struct {
+    socket: *zmq.Socket,
+    thread: std.Thread,
+    arena: std.heap.ArenaAllocator,
+
+    const log = std.log.scoped(.collect);
+
+    fn handleDiscovery(rest: []zmq.Message, new_discovery: anytype) !void {
+        if (rest.len != 1) return error.InvalidNbFrames;
+        const discovered_host = try wire.recvMP(wire.Host, &rest[0]);
+        try new_discovery.exec(.{}, .{
+            .ip = discovered_host.ip,
+            .port = discovered_host.port,
+            .timestamp = std.time.timestamp(),
+            .priority = 10,
+        });
+    }
+
+    fn handleLegacySuccess(rest: []zmq.Message, success_legacy: anytype) !void {
+        if (rest.len != 3) return error.InvalidNbFrames;
+        const host = try wire.recvMP(wire.Host, &rest[0]);
+        const h = try wire.recvMP(wire.LegacySuccessHeader, &rest[1]);
+
+        try success_legacy.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
+            .max_players = h.max_players,
+            .current_players = h.current_players,
+            .motd = rest[3].data(),
+        });
+    }
+
+    fn handleLegacyFailure(rest: []zmq.Message, failure_legacy: anytype) !void {
+        if (rest.len != 1) return error.InvalidNbFrames;
+        const host = try wire.recvMP(wire.Host, &rest[0]);
+        try failure_legacy.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
+        });
+    }
+
+    fn handlePingSuccess(rest: []zmq.Message, success_ping: anytype, favicon: *sqlite.DynamicStatement) !void {
+        if (rest.len < 3 or rest.len > 4) return error.InvalidNbFrames;
+        const host = try wire.recvMP(wire.Host, &rest[0]);
+        const h = try wire.recvMP(wire.PingSuccessHeader, &rest[1]);
+
+        var favicon_id: ?u64 = null;
+        if (rest.len == 4) {
+            favicon_id = try favicon.one(u64, .{}, .{.d = rest[3].data()});
+        }
+
+        try success_ping.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
+            .max_players = h.max_players,
+            .current_players = h.current_players,
+            .motd = rest[2].data(),
+        });
+    }
+
+    fn handlePingFailure(rest: []zmq.Message, failure_ping: anytype) !void {
+        if (rest.len != 1) return error.InvalidNbFrames;
+        const host = try wire.recvMP(wire.Host, &rest[0]);
+        try failure_ping.exec(.{}, .{
+            .ip = host.ip,
+            .port = host.port,
+            .timestamp = std.time.timestamp(),
+        });
+    }
+
+
+    fn handleJoinSuccess(rest: []zmq.Message, success_join: anytype) !void {
+        _ = rest; // autofix
+        _ = success_join; // autofix
+        return error.Unimplemented;
+    }
+
+    fn handleJoinFailure(rest: []zmq.Message, success_join: anytype) !void {
+        _ = rest; // autofix
+        _ = success_join; // autofix
+                    // const host = try wire.recv(wire.Host, state.collect.socket, .{});
+                    // var reason = zmq.Message.init();
+                    // defer reason.deinit();
+                    // reason.recv(state.collect.socket, .{});
+                    // try std.heap.c_allocator.dupeZ(u8, reason);
+                    // try failure_ping.exec(.{}, .{
+                        // .ip = host.ip,
+                        // .port = host.port,
+                        // .timestamp = std.time.timestamp(),
+                        // .reason = reason.data(),
+                    // });
+        return error.Unimplemented;
+    }
+
+    pub fn worker(state: *State) void {
+        var new_discovery = state.db.prepareDynamic(@embedFile("sql/new_discovery.sql")) catch @panic("bruh");
+        var success_legacy = state.db.prepareDynamic(@embedFile("sql/success_legacy.sql")) catch @panic("bruh");
+        var failure_legacy = state.db.prepareDynamic(@embedFile("sql/failure_legacy.sql")) catch @panic("bruh");
+        var success_ping = state.db.prepareDynamic(@embedFile("sql/success_ping.sql")) catch @panic("bruh");
+        var failure_ping = state.db.prepareDynamic(@embedFile("sql/failure_ping.sql")) catch @panic("bruh");
+        var success_join = state.db.prepareDynamic(@embedFile("sql/success_join.sql")) catch @panic("bruh");
+        var failure_join = state.db.prepareDynamic(@embedFile("sql/failure_join.sql")) catch @panic("bruh");
+        var diags: sqlite.Diagnostics = .{};
+        var favicon = state.db.prepareDynamicWithDiags(@embedFile("sql/favicon.sql"), .{.diags =  &diags}) catch std.debug.panicExtra(null, null, "{}", .{diags});
+
+        while (true) {
+            new_discovery.reset();
+            success_legacy.reset();
+            failure_legacy.reset();
+            success_ping.reset();
+            failure_ping.reset();
+            success_join.reset();
+            failure_join.reset();
+            favicon.reset();
+            _ = state.collect.arena.reset(.{ .retain_with_limit = 4 << 20 });
+
+            var fm = recvAll(state.collect.socket, state.collect.arena.allocator()) catch |err| switch (err) {
+                error.NotSocket => return,
+                error.Terminated => return,
+                else => {
+                    log.warn("recv error {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+            defer deinitAll(&fm, state.collect.arena.allocator());
+
+            if (fm.items.len < 2) {
+                log.warn("discarded {d} messages", .{fm.items.len});
+                continue;
+            }
+
+            const header = wire.recvMP(wire.StatusHeader, &fm.items[0]) catch continue;
+
+            if (header.version != .latest) {
+                log.warn("incorrect version {d}", .{@intFromEnum(header.version)});
+                continue;
+            }
+
+            const rest = fm.items[1..];
+            const res = switch (header.kind) {
+                .discovery => handleDiscovery(rest, &new_discovery),
+
+                .legacy_success => handleLegacySuccess(rest, &success_legacy),
+                .legacy_failure => handleLegacyFailure(rest, &failure_legacy),
+
+                .ping_success => handlePingSuccess(rest, &success_ping, &favicon),
+                .ping_failure => handlePingFailure(rest, &failure_ping),
+
+                .join_success => handleJoinSuccess(rest, &success_join),
+                .join_failure => handleJoinFailure(rest, &failure_join),
+
+                _ => |k| {
+                    log.warn("incorrect kind {d}", .{@intFromEnum(k)});
+                    wire.send({}, state.collect.socket, .{}) catch {};
+                    continue;
+                },
+            };
+            res catch |err| switch (err) {
+                else => {
+                    log.warn("handling error {s}", .{@errorName(err)});
+                    continue;
+                },
+            };
+        }
+    }
+};
+
+pub const Api = struct {
+    socket: *zmq.Socket,
+    thread: std.Thread,
+    arena: std.heap.ArenaAllocator,
+
+    const log = std.log.scoped(.api);
+
+    pub fn worker(state: *State) void {
+        _ = state; // autofix
+    }
 };
 
 pub const State = struct {
     config: Config,
     ctx: *zmq.Context,
-    announce: *zmq.Socket,
-    announce_thread: std.Thread,
-    collect: *zmq.Socket,
-    collect_thread: std.Thread,
-    api: *zmq.Socket,
-    api_thread: std.Thread,
     db: sqlite.Db,
 
+    announce: Announce,
+    collect: Collect,
+    api: Api,
+
+    arena: std.heap.ArenaAllocator,
+
     pub fn init(state: *State, config_buf: []const u8) !void {
+        state.* = undefined;
+        errdefer state.* = undefined;
+
+        state.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer state.arena.deinit();
+
+        state.announce.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer state.announce.arena.deinit();
+
+        state.collect.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer state.collect.arena.deinit();
+
+        state.api.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        errdefer state.api.arena.deinit();
+
         const config = try conf.parse(Config, config_buf);
 
         const ctx = try zmq.Context.init();
@@ -43,240 +421,112 @@ pub const State = struct {
 
         const announce = try ctx.socket(.rep);
         errdefer announce.close();
-        try announce.bind_nonterminated(config.announce, std.heap.c_allocator);
+        {
+            const zt_announce = try state.arena.allocator().dupeZ(u8, config.announce);
+            defer state.arena.allocator().free(zt_announce);
+            try announce.bindZ(zt_announce);
+        }
 
         const collect = try ctx.socket(.pull);
         errdefer collect.close();
-        try collect.bind_nonterminated(config.collect, std.heap.c_allocator);
+        {
+            const zt_collect = try state.arena.allocator().dupeZ(u8, config.collect);
+            defer state.arena.allocator().free(zt_collect);
+            try collect.bindZ(zt_collect);
+        }
 
         const api = try ctx.socket(.rep);
         errdefer api.close();
-        try api.bind_nonterminated(config.api, std.heap.c_allocator);
 
-        const zt_file_name = try std.heap.c_allocator.dupeZ(u8, config.db_path);
-        defer std.heap.c_allocator.free(zt_file_name);
+        if (config.api_curve_secret_key) |secret| {
+            {
+                const server: c_int = 1;
+                try api.setOption(.curve_server, &server, @sizeOf(c_int));
+            }
+            try api.setOption(.curve_secretkey, secret.ptr, secret.len);
+        }
 
-        var db = try sqlite.Db.init(.{
-            .mode = sqlite.Db.Mode{ .File = zt_file_name },
+        {
+            const zt_api = try state.arena.allocator().dupeZ(u8, config.api);
+            defer state.arena.allocator().free(zt_api);
+            try api.bindZ(zt_api);
+        }
+
+        const zt_file_name = try state.arena.allocator().dupeZ(u8, config.db_path);
+
+        state.db = try sqlite.Db.init(.{
+            .mode = .{ .File = zt_file_name },
             .open_flags = .{
                 .write = true,
                 .create = true,
             },
-            .threading_mode = .MultiThread,
+            .threading_mode = .Serialized,
         });
-        errdefer db.deinit();
+        errdefer state.db.deinit();
 
-        state.* = .{
-            .config = config,
-            .ctx = ctx,
-            .announce = announce,
-            .announce_thread = undefined,
-            .collect = collect,
-            .collect_thread = undefined,
-            .api = api,
-            .api_thread = undefined,
-            .db = db,
+        var diags: sqlite.Diagnostics = .{};
+        state.db.execMulti(
+            @embedFile("sql/first_run.sql"),
+            .{ .diags = &diags },
+        ) catch |e| {
+            std.log.warn("{} {s}\n", .{ diags, @errorName(e) });
         };
-        errdefer state.* = undefined;
 
-        state.announce_thread = try std.Thread.spawn(
+        state.config = config;
+        state.ctx = ctx;
+
+        state.announce.socket = announce;
+        state.collect.socket = collect;
+        state.api.socket = api;
+
+        state.announce.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
-            announceWorker,
+            Announce.worker,
             .{state},
         );
-        errdefer state.announce_thread.detach(); // thread will terminate on its own due to error.Terminated
+        errdefer state.announce.thread.detach(); // thread will terminate on its own due to error.Terminated
 
-        state.api_thread = try std.Thread.spawn(
+        state.api.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
-            apiWorker,
+            Api.worker,
             .{state},
         );
-        errdefer state.api_thread.detach(); // thread will terminate on its own due to error.Terminated
+        errdefer state.api.thread.detach(); // thread will terminate on its own due to error.Terminated
 
-        state.collect_thread = try std.Thread.spawn(
+        state.collect.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
-            collectWorker,
+            Collect.worker,
             .{state},
         );
-        errdefer state.collect_thread.detach(); // thread will terminate on its own due to error.Terminated
+        errdefer state.collect.thread.detach(); // thread will terminate on its own due to error.Terminated
     }
 
     pub fn deinit(state: *State) void {
-        state.api.close();
-        state.collect.close();
-        state.announce.close();
+        state.api.socket.close();
+        state.collect.socket.close();
+        state.announce.socket.close();
 
         state.ctx.deinit();
         // threads should get error.Terminated right about now
         state.join();
         state.db.deinit();
+        state.arena.deinit();
         state.* = undefined;
     }
 
     pub fn join(state: *State) void {
-        state.announce_thread.join();
-        state.collect_thread.join();
-        state.api_thread.join();
-    }
-
-    fn announceWorker(state: *State) void {
-        _ = state;
-    }
-
-    fn collectWorker(state: *State) void {
-        _ = state;
-    }
-
-    fn apiWorker(state: *State) void {
-        _ = state;
-    }
-
-    pub fn initDb(state: *State) !void {
-        // we use execDynamic here because the query is too long to validate at compile time
-        try state.db.execDynamic(
-            \\PRAGMA schema.user_version = 0;
-            \\PRAGMA foreign_keys = ON;
-            \\
-            \\CREATE TABLE IF NOT EXISTS excluded (
-            \\    prefix UINT32 NOT NULL,
-            \\    msbs UINT8 NOT NULL,
-            \\    reason TEXT,
-            \\    PRIMARY KEY(prefix, msbs)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS pending_discovery (
-            \\    prefix UINT32 NOT NULL,
-            \\    msbs UINT8 NOT NULL,
-            \\    priority INTEGER,
-            \\    PRIMARY KEY(prefix, msbs)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS pending_ping (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    priority INTEGER,
-            \\    PRIMARY KEY(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS pending_legacy (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    priority INTEGER,
-            \\    PRIMARY KEY(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS pending_join (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    priority INTEGER,
-            \\    PRIMARY KEY(prefix, msbs)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS servers (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT6 NOT NULL,
-            \\    PRIMARY KEY(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS discoveries (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS favicons (
-            \\    data: BLOB PRIMARY KEY,
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS failed_pings (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port),
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS successful_pings (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\    enforces_secure_chat BOOL NOT NULL,
-            \\    prevents_chat_reports BOOL NOT NULL,
-            \\    version_name TEXT,
-            \\    version_protocol INTEGER NOT NULL,
-            \\    favicon_id INTEGER,
-            \\    max_players INTEGER,
-            \\    current_players INTEGER,
-            // because the description can contain arbitrary json, we save arbitrary json that we can
-            // render, except when it's just text.
-            \\    description_json TEXT,
-            \\    description_text TEXT,
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port),
-            \\    FOREIGN KEY (favicon_id) REFERENCES favicons(_rowid_),
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS failed_legacy_pings (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port),
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS successful_legacy_pings (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\    max_players INTEGER,
-            \\    current_players INTEGER,
-            \\    description_json TEXT,
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS failed_joins (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port),
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS successful_joins (
-            \\    ip UINT32 NOT NULL,
-            \\    port UINT16 NOT NULL,
-            \\    timestamp UINT NOT NULL,
-            // TODO: which information can be gained from joining?
-            \\    FOREIGN KEY (ip, port) REFERENCES servers(ip, port)
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS players (
-            \\    uuid BINARY(128) PRIMARY KEY,
-            \\    name CHARACTER(16) NOT NULL
-            \\) STRICT;
-            \\
-            \\CREATE TABLE IF NOT EXISTS ping_players (
-            \\    ping_id INTEGER,
-            \\    player_uuid INTEGER,
-            \\    PRIMARY KEY (ping_id, player_uuid),
-            \\    FOREIGN KEY (ping_id) REFERENCES successful_pings(_rowid_),
-            \\    FOREIGN KEY (player_uuid) REFERENCES players(uuid),
-            \\) STRICT;
-            \\
-            \\PRAGMA integrity_check;
-        , .{}, .{});
+        state.announce.thread.join();
+        state.collect.thread.join();
+        state.api.thread.join();
     }
 };
 
 pub fn main() !void {
-    if (std.os.argv.len < 2) {
-        std.debug.print("{s} <config file>\n", .{std.os.argv[0]});
-        return error.TooFewArguments;
-    }
-
-    const config_buf = try std.fs.cwd().readFileAlloc(std.heap.c_allocator, std.mem.span(std.os.argv[1]), 10 << 20);
+    const config_buf = if (std.os.argv.len < 2) "" else try std.fs.cwd().readFileAlloc(std.heap.c_allocator, std.mem.span(std.os.argv[1]), 10 << 20);
     defer std.heap.c_allocator.free(config_buf);
 
     var s: State = undefined;
     try s.init(config_buf);
     defer s.deinit();
-    try s.initDb();
+    s.join();
 }

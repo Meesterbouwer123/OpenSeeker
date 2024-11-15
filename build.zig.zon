@@ -3,8 +3,17 @@
     .version = "0.0.1",
     .dependencies = .{
         .sqlite = .{
-            .url = "https://github.com/vrischmann/zig-sqlite/archive/7d50331972777727d0a22f5e4a51e8a06c410bad.tar.gz",
-            .hash = "1220f01a534f84839a66b127b88183bd81f6ab3778289150aa79f83ae126e4a8e0df",
+            .url = "https://github.com/notcancername/zig-sqlite/archive/bbbfcd6.zip",
+            .hash = "12209eab8ab8304a6cbd9bd63285218e5f8ace761139e39147017deb7b9b76b737ea",
+        },
+        .libzmq = .{
+            .url = "git+https://github.com/notcancername/libzmq?ref=master#dda796c3b2b3aa1bb1589d7a8d0a6a1b394feabf",
+            .hash = "12204b2fa6ce5d91976b6f0ddd8f5b61e86afc2e96a499307fe125e065e7463eb74e",
+            .lazy = true,
+        },
+        .zlzmq = .{
+            .url = "git+https://github.com/notcancername/zlzmq?ref=master#c3eb4a4217127b129d1d590c8c635542fb3e15fb",
+            .hash = "122052c403acec6de20c86d9a67fa672c62ae479116456cc5c29fbcfd3402aecb22d",
         },
     },
 

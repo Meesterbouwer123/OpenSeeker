@@ -122,7 +122,7 @@ pub const Range = extern struct {
     prefix: Ip align(1),
     msbs: u8,
 
-    pub const invalid = .{ .ip = .{ .i = 0xffffffff }, .msbs = 0xff };
+    pub const invalid: Range = .{ .ip = .{ .i = 0xffffffff }, .msbs = 0xff };
 
     pub fn isValid(r: Range) bool {
         return r.msbs <= 32;

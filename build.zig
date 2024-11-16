@@ -87,6 +87,7 @@ pub fn build(b: *std.Build) void {
     });
     discovery.addIncludePath(b.path("src"));
     discovery.root_module.addImport("zmq", zlzmq);
+    discovery.addObject(list_parser);
     linkZmq(b, discovery, target);
 
     const openseekerctl = b.addExecutable(.{

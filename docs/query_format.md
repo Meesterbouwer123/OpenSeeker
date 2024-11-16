@@ -41,8 +41,36 @@ The server responds to a query with another multipart message. This one contains
 If the error code is 0, that means it was a success, and the server will put a JSON list containing the found servers (limited to 100) in the data.
 Otherwise, the data will contain a string containing an error description.
 
+## error codes
 | error code | description |
 |------------|-------------|
 | 0 | Success |
 | 1 | Version mismatch |
 | 2 | Invalid Query |
+
+## server response
+The server will respond with a list of JSON objects, with an empty list meaning "no servers matched your search".
+The objects will have the following format:
+```
+{
+    "ip": string,
+    "port": number,
+    "last_seen": number (unix milliseconds),
+    "current_players": number,
+    "max_players": number,
+    "description": string (the raw description we got from the server, will probably be in JSON format),
+    "protocol": number,
+    "version": string,
+    "enforces_secure_chat": bool (may be absent/null),
+    "prevents_chat_reports": bool (may be absent/null),
+    "favicon": string (base64 encoded blob),
+    "players": [
+        {
+            "name": string,
+            "uuid": string (dashed format),
+            "last_seen": number (unix millis)
+        },
+        ...
+    ]
+}
+```

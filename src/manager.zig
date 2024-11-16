@@ -3,37 +3,7 @@ const zmq = @import("zmq");
 const wire = @import("wire.zig");
 const conf = @import("conf.zig");
 const sqlite = @import("sqlite");
-
-const MultipartMessage = std.ArrayListUnmanaged(zmq.Message);
-
-pub fn recvAll(s: *zmq.Socket, ally: std.mem.Allocator) !MultipartMessage {
-    const log = std.log.scoped(.recv_all);
-    log.debug("enter {} {}", .{ s, ally.ptr });
-    var fm: MultipartMessage = .{};
-    errdefer deinitAll(&fm, ally);
-
-    var more = true;
-    while (more) {
-        var m = try fm.addOne(ally);
-        errdefer _ = fm.pop();
-
-        m.* = zmq.Message.init();
-        errdefer m.deinit();
-        try m.recv(s, .{});
-        log.debug("\"{s}\" {}", .{ std.fmt.fmtSliceEscapeLower(m.data()), m.hasMore() });
-        more = m.hasMore();
-    }
-    return fm;
-}
-
-pub fn deinitAll(m: *MultipartMessage, ally: std.mem.Allocator) void {
-    const log = std.log.scoped(.deinit_all);
-    for (m.items) |*ms| {
-        log.debug("\"{s}\"", .{std.fmt.fmtSliceEscapeLower(ms.data())});
-        ms.deinit();
-    }
-    m.deinit(ally);
-}
+const multipart = @import("multipart.zig");
 
 const Config = struct {
     db_path: []const u8 = "openseeker_manager.sqlite3",
@@ -131,17 +101,21 @@ pub const Announce = struct {
         get_discovery: *sqlite.DynamicStatement,
         excluded_ranges: *sqlite.DynamicStatement,
         finish_discovery: *sqlite.DynamicStatement,
+        requeue_discovery: *sqlite.DynamicStatement,
     ) !void {
         const discovery_request = try wire.recvMP(wire.DiscoveryRequest, dis_req);
 
-        if (!discovery_request.flags.is_first_request) {
-            try finish_discovery.exec(
-                .{},
-                .{
-                    .prefix = discovery_request.previous_range.prefix,
-                    .msbs = discovery_request.previous_range.msbs,
-                },
-            );
+        if (discovery_request.flags.failed) {
+            try requeue_discovery.exec(.{}, .{
+                .prefix = discovery_request.previous_range.prefix,
+                .msbs = discovery_request.previous_range.msbs,
+                .priority = 127,
+            });
+        } else if (!discovery_request.flags.is_first_request) {
+            try finish_discovery.exec(.{}, .{
+                .prefix = discovery_request.previous_range.prefix,
+                .msbs = discovery_request.previous_range.msbs,
+            });
         }
 
         const new_range = try get_discovery.one(wire.Range, .{}, .{ .limit = 1 });
@@ -170,14 +144,18 @@ pub const Announce = struct {
         const excluded = try alist.toOwnedSlice(std.heap.c_allocator);
 
         try announce.socket.send(std.mem.asBytes(&new_range), .{ .sndmore = true });
-        var m = try zmq.Message.initOwned(std.mem.sliceAsBytes(excluded), wire.wireFree, null);
-        try m.send(announce.socket, .{});
+        {
+            var m = try zmq.Message.initOwned(std.mem.sliceAsBytes(excluded), wire.wireFree, null);
+            try m.send(announce.socket, .{ .sndmore = true });
+        }
+        try wire.send(wire.PortRange{.start = 25565, .end = 25565}, announce.socket, .{});
     }
 
     pub fn worker(state: *State) void {
         const announce = &state.announce;
         var get_discovery = state.db.prepareDynamic(@embedFile("sql/get_discovery.sql")) catch @panic("bruh");
         var finish_discovery = state.db.prepareDynamic(@embedFile("sql/finish_discovery.sql")) catch @panic("bruh");
+        var requeue_discovery = state.db.prepareDynamic(@embedFile("sql/requeue_discovery.sql")) catch @panic("bruh");
         var get_legacy = state.db.prepareDynamic(@embedFile("sql/get_legacy.sql")) catch @panic("bruh");
         var get_ping = state.db.prepareDynamic(@embedFile("sql/get_ping.sql")) catch @panic("bruh");
         var get_join = state.db.prepareDynamic(@embedFile("sql/get_join.sql")) catch @panic("bruh");
@@ -185,13 +163,15 @@ pub const Announce = struct {
 
         while (true) {
             get_discovery.reset();
+            finish_discovery.reset();
+            requeue_discovery.reset();
             get_legacy.reset();
             get_ping.reset();
             get_join.reset();
             excluded_ranges.reset();
             _ = announce.arena.reset(.{ .retain_with_limit = 4 << 20 });
 
-            var fm = recvAll(announce.socket, announce.arena.allocator()) catch |err| switch (err) {
+            var fm = multipart.recv(announce.socket, announce.arena.allocator()) catch |err| switch (err) {
                 error.NotSocket => return,
                 error.Terminated => return,
                 else => {
@@ -199,15 +179,14 @@ pub const Announce = struct {
                     continue;
                 },
             };
-            defer deinitAll(&fm, announce.arena.allocator());
-            log.debug("worker recvd", .{});
+            defer multipart.deinit(&fm, announce.arena.allocator());
 
-            if (fm.items.len != 2) {
-                log.warn("discarded {d} messages", .{fm.items.len});
+            if (fm.len != 2) {
+                log.warn("discarded {d} frames", .{fm.len});
                 continue;
             }
 
-            const header = wire.recvMP(wire.AnnounceHeader, &fm.items[0]) catch continue;
+            const header = wire.recvMP(wire.AnnounceHeader, &fm[0]) catch continue;
 
             if (header.version != .latest) {
                 log.warn("incorrect version {d}", .{@intFromEnum(header.version)});
@@ -215,8 +194,8 @@ pub const Announce = struct {
             }
 
             const res = switch (header.kind) {
-                .slp => announce.handleSlpRequest(&fm.items[1], &get_legacy, &get_ping, &get_join),
-                .discovery => announce.handleDiscoveryRequest(&fm.items[1], &get_discovery, &excluded_ranges, &finish_discovery),
+                .slp => announce.handleSlpRequest(&fm[1], &get_legacy, &get_ping, &get_join),
+                .discovery => announce.handleDiscoveryRequest(&fm[1], &get_discovery, &excluded_ranges, &finish_discovery, &requeue_discovery),
 
                 _ => |k| {
                     log.warn("incorrect kind {d}", .{@intFromEnum(k)});
@@ -354,7 +333,7 @@ pub const Collect = struct {
             favicon.reset();
             _ = collect.arena.reset(.{ .retain_with_limit = 4 << 20 });
 
-            var fm = recvAll(collect.socket, collect.arena.allocator()) catch |err| switch (err) {
+            var fm = multipart.recv(collect.socket, collect.arena.allocator()) catch |err| switch (err) {
                 error.NotSocket => return,
                 error.Terminated => return,
                 else => {
@@ -362,21 +341,21 @@ pub const Collect = struct {
                     continue;
                 },
             };
-            defer deinitAll(&fm, collect.arena.allocator());
+            defer multipart.deinit(&fm, collect.arena.allocator());
 
-            if (fm.items.len < 2) {
-                log.warn("discarded {d} messages", .{fm.items.len});
+            if (fm.len < 2) {
+                log.warn("discarded {d} messages", .{fm.len});
                 continue;
             }
 
-            const header = wire.recvMP(wire.StatusHeader, &fm.items[0]) catch continue;
+            const header = wire.recvMP(wire.StatusHeader, &fm[0]) catch continue;
 
             if (header.version != .latest) {
                 log.warn("incorrect version {d}", .{@intFromEnum(header.version)});
                 continue;
             }
 
-            const rest = fm.items[1..];
+            const rest = fm[1..];
             const res = switch (header.kind) {
                 .discovery => handleDiscovery(rest, &new_discovery),
 
@@ -432,18 +411,18 @@ pub const Api = struct {
             unexclude_range.reset();
             _ = api.arena.reset(.{ .retain_with_limit = 4 << 20 });
 
-            var fm = recvAll(api.socket, api.arena.allocator()) catch |err| {
+            var fm = multipart.recv(api.socket, api.arena.allocator()) catch |err| {
                 log.warn("recv failed {}", .{err});
                 continue;
             };
-            defer deinitAll(&fm, api.arena.allocator());
+            defer multipart.deinit(&fm, api.arena.allocator());
 
-            if (fm.items.len < 3 or fm.items.len > 5) {
-                log.err("bruh, {d}", .{fm.items.len});
+            if (fm.len < 3 or fm.len > 5) {
+                log.err("bruh, {d}", .{fm.len});
                 continue;
             }
 
-            const h = wire.recvMP(wire.ApiHeader, &fm.items[2]) catch |err| {
+            const h = wire.recvMP(wire.ApiHeader, &fm[2]) catch |err| {
                 log.warn("api header {}", .{err});
                 continue;
             };
@@ -455,7 +434,7 @@ pub const Api = struct {
 
             if (h.kind == .query) {
                 log.err("query asynchronously and authorize here", .{});
-                fm.items[0].send(api.socket, .{ .sndmore = true }) catch continue;
+                fm[0].send(api.socket, .{ .sndmore = true }) catch continue;
                 wire.send({}, api.socket, .{ .sndmore = true }) catch continue;
                 wire.send({}, api.socket, .{}) catch continue;
                 continue;
@@ -463,18 +442,18 @@ pub const Api = struct {
 
             if (state.config.control_curve_admin_public_key != null) @panic("authenticate");
 
-            fm.items[0].send(api.socket, .{ .sndmore = true }) catch continue;
+            fm[0].send(api.socket, .{ .sndmore = true }) catch continue;
             wire.send({}, api.socket, .{ .sndmore = true }) catch continue;
 
             const res = switch (h.kind) {
-                .enqueue_range => api.handleEnqueue(fm.items[3..], &enqueue_range),
-                .remove_range => api.handleRemove(fm.items[3..], &remove_range),
+                .enqueue_range => api.handleEnqueue(fm[3..], &enqueue_range),
+                .remove_range => api.handleRemove(fm[3..], &remove_range),
 
-                .authorize_public_key => api.handleAuthorize(fm.items[3..], &authorize_public_key),
-                .remove_public_key => api.handleUnauthorize(fm.items[3..], &remove_public_key),
+                .authorize_public_key => api.handleAuthorize(fm[3..], &authorize_public_key),
+                .remove_public_key => api.handleUnauthorize(fm[3..], &remove_public_key),
 
-                .exclude_range => api.handleExclude(fm.items[3..], &exclude_range),
-                .unexclude_range => api.handleUnexclude(fm.items[3..], &unexclude_range),
+                .exclude_range => api.handleExclude(fm[3..], &exclude_range),
+                .unexclude_range => api.handleUnexclude(fm[3..], &unexclude_range),
 
                 else => |k| {
                     log.warn("incorrect kind {d}", .{@intFromEnum(k)});

@@ -63,7 +63,6 @@ pub fn recvMP(comptime T: type, m: *zmq.Message) !*T {
     }
 }
 
-
 pub const Ip = packed union {
     i: u32,
     b: packed struct(u32) {
@@ -123,6 +122,8 @@ pub const Range = extern struct {
     prefix: Ip align(1),
     msbs: u8,
 
+    pub const invalid = .{ .ip = .{ .i = 0xffffffff }, .msbs = 0xff };
+
     pub fn isValid(r: Range) bool {
         return r.msbs <= 32;
     }
@@ -140,10 +141,16 @@ pub const Range = extern struct {
     }
 };
 
+pub const PortRange = extern struct {
+    start: u16 align(1),
+    end: u16 align(1),
+};
+
 pub const DiscoveryRequest = extern struct {
     flags: packed struct {
-        padding: u6 = 0,
+        padding: u5 = 0,
         is_exiting: bool,
+        failed: bool,
         is_first_request: bool,
     },
     packets_per_sec: u32 align(1),
@@ -176,7 +183,7 @@ pub const AnnounceHeader = extern struct {
         _,
     };
 
-    version: Version,
+    version: Version = .latest,
     kind: Kind,
 };
 
@@ -201,7 +208,7 @@ pub const StatusHeader = extern struct {
         _,
     };
 
-    version: Version,
+    version: Version = .latest,
     kind: Kind,
 };
 

@@ -37,8 +37,11 @@ pub fn main() !void {
                 try api_req.setOption(.curve_publickey, &public_buf, 40);
             }
         } else {
-            try api_req.setOption(.curve_secretkey, "D:)Q[IlAW!ahhC2ac:9*A}h:p?([4%wOTJ%JR%cs", 40);
-            try api_req.setOption(.curve_publickey, "Yne@$w-vo<fVvi]a<NY6T1ed:M$fCG*[IaLV{hID", 40);
+            var public_buf: [40:0]u8 = undefined;
+            var secret_buf: [40:0]u8 = undefined;
+            try zmq.curve.keypair(&public_buf, &secret_buf);
+            try api_req.setOption(.curve_publickey, &public_buf, 40);
+            try api_req.setOption(.curve_secretkey, &secret_buf, 40);
         }
     }
 

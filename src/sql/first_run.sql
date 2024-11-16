@@ -127,11 +127,15 @@ CREATE TABLE IF NOT EXISTS successful_pings (
     favicon_id INT,
     max_players INT,
     current_players INT,
+    -- full text component json with all the bells and whistles.
     description_json TEXT,
+    -- all formatting stripped
     description_text TEXT,
     extra_json TEXT,
+
     FOREIGN KEY (ip, port) REFERENCES servers(ip, port) ON DELETE CASCADE,
     FOREIGN KEY (favicon_id) REFERENCES favicons(id) ON DELETE RESTRICT
+    CHECK(description_json NOT NULL AND NOT description_text IS NULL),
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS failed_legacy_pings (

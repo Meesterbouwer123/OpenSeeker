@@ -37,6 +37,7 @@ fn linkZmq(b: *std.Build, exe: anytype, target: std.Build.ResolvedTarget) void {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const llvm = b.option(bool, "llvm", "use llvm (debug false)") orelse (optimize != .Debug);
 
     const sqlite = b.dependency("sqlite", .{
         .target = target,
@@ -71,6 +72,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .use_lld = llvm,
+        .use_llvm = llvm,
     });
     test_masscan_parser.addIncludePath(b.path("src"));
     test_masscan_parser.addObject(list_parser);
@@ -86,12 +89,25 @@ pub fn build(b: *std.Build) void {
     discovery.root_module.addImport("zmq", zlzmq);
     linkZmq(b, discovery, target);
 
+    const openseekerctl = b.addExecutable(.{
+        .name = "openseekerctl",
+        .root_source_file = b.path("src/openseekerctl.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    openseekerctl.addIncludePath(b.path("src"));
+    openseekerctl.root_module.addImport("zmq", zlzmq);
+    linkZmq(b, openseekerctl, target);
+
     const manager = b.addExecutable(.{
         .name = "manager",
         .root_source_file = b.path("src/manager.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .use_lld = llvm,
+        .use_llvm = llvm,
     });
     manager.root_module.addImport("zmq", zlzmq);
     linkZmq(b, manager, target);
@@ -104,11 +120,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .use_lld = llvm,
+        .use_llvm = llvm,
     });
     gen_keypair.root_module.addImport("zmq", zlzmq);
     linkZmq(b, gen_keypair, target);
 
     b.installArtifact(discovery);
+    b.installArtifact(openseekerctl);
     b.installArtifact(manager);
     b.installArtifact(gen_keypair);
 

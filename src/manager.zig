@@ -7,6 +7,8 @@ const sqlite = @import("sqlite");
 const MultipartMessage = std.ArrayListUnmanaged(zmq.Message);
 
 pub fn recvAll(s: *zmq.Socket, ally: std.mem.Allocator) !MultipartMessage {
+    const log = std.log.scoped(.recv_all);
+    log.debug("enter {} {}", .{ s, ally.ptr });
     var fm: MultipartMessage = .{};
     errdefer deinitAll(&fm, ally);
 
@@ -17,15 +19,19 @@ pub fn recvAll(s: *zmq.Socket, ally: std.mem.Allocator) !MultipartMessage {
 
         m.* = zmq.Message.init();
         errdefer m.deinit();
-
         try m.recv(s, .{});
+        log.debug("\"{s}\" {}", .{ std.fmt.fmtSliceEscapeLower(m.data()), m.hasMore() });
         more = m.hasMore();
     }
     return fm;
 }
 
 pub fn deinitAll(m: *MultipartMessage, ally: std.mem.Allocator) void {
-    for (m.items) |*ms| ms.deinit();
+    const log = std.log.scoped(.deinit_all);
+    for (m.items) |*ms| {
+        log.debug("\"{s}\"", .{std.fmt.fmtSliceEscapeLower(ms.data())});
+        ms.deinit();
+    }
     m.deinit(ally);
 }
 
@@ -194,6 +200,7 @@ pub const Announce = struct {
                 },
             };
             defer deinitAll(&fm, announce.arena.allocator());
+            log.debug("worker recvd", .{});
 
             if (fm.items.len != 2) {
                 log.warn("discarded {d} messages", .{fm.items.len});
@@ -399,11 +406,12 @@ pub const Collect = struct {
 };
 
 pub const Api = struct {
+    const log = std.log.scoped(.api);
+
+    arena: std.heap.ArenaAllocator,
     socket: *zmq.Socket,
     thread: std.Thread,
-    arena: std.heap.ArenaAllocator,
-
-    const log = std.log.scoped(.api);
+    db: sqlite.Db,
 
     pub fn worker(state: *State) void {
         const api = &state.api;
@@ -424,38 +432,49 @@ pub const Api = struct {
             unexclude_range.reset();
             _ = api.arena.reset(.{ .retain_with_limit = 4 << 20 });
 
-            var fm = recvAll(api.socket, api.arena.allocator()) catch continue;
+            var fm = recvAll(api.socket, api.arena.allocator()) catch |err| {
+                log.warn("recv failed {}", .{err});
+                continue;
+            };
             defer deinitAll(&fm, api.arena.allocator());
 
-            if (fm.items.len < 4 or fm.items.len > 4 or fm.items[1].len() != 0) {
+            if (fm.items.len < 3 or fm.items.len > 5) {
                 log.err("bruh, {d}", .{fm.items.len});
+                continue;
             }
 
-            const h = wire.recvMP(wire.ApiHeader, &fm.items[2]) catch continue;
-            if (h.version != .latest) continue;
+            const h = wire.recvMP(wire.ApiHeader, &fm.items[2]) catch |err| {
+                log.warn("api header {}", .{err});
+                continue;
+            };
+
+            if (h.version != .latest) {
+                log.warn("version {}", .{h.version});
+                continue;
+            }
 
             if (h.kind == .query) {
                 log.err("query asynchronously and authorize here", .{});
-                fm.items[0].send(api.socket, .{.sndmore = true}) catch continue;
-                wire.send({}, api.socket, .{.sndmore = true}) catch continue;
+                fm.items[0].send(api.socket, .{ .sndmore = true }) catch continue;
+                wire.send({}, api.socket, .{ .sndmore = true }) catch continue;
                 wire.send({}, api.socket, .{}) catch continue;
                 continue;
             }
 
             if (state.config.control_curve_admin_public_key != null) @panic("authenticate");
 
-            fm.items[0].send(api.socket, .{.sndmore = true}) catch continue;
-            wire.send({}, api.socket, .{.sndmore = true}) catch continue;
+            fm.items[0].send(api.socket, .{ .sndmore = true }) catch continue;
+            wire.send({}, api.socket, .{ .sndmore = true }) catch continue;
 
             const res = switch (h.kind) {
-                .enqueue_range => api.handleEnqueue(&fm.items[3], &enqueue_range),
-                .remove_range => api.handleRemove(&fm.items[3], &remove_range),
+                .enqueue_range => api.handleEnqueue(fm.items[3..], &enqueue_range),
+                .remove_range => api.handleRemove(fm.items[3..], &remove_range),
 
-                .authorize_public_key => api.handleAuthorize(&fm.items[3], &authorize_public_key),
-                .remove_public_key => api.handleUnauthorize(&fm.items[3], &remove_public_key),
+                .authorize_public_key => api.handleAuthorize(fm.items[3..], &authorize_public_key),
+                .remove_public_key => api.handleUnauthorize(fm.items[3..], &remove_public_key),
 
-                .exclude_range => api.handleExclude(&fm.items[3], &exclude_range),
-                .unexclude_range => api.handleUnexclude(&fm.items[3], &unexclude_range),
+                .exclude_range => api.handleExclude(fm.items[3..], &exclude_range),
+                .unexclude_range => api.handleUnexclude(fm.items[3..], &unexclude_range),
 
                 else => |k| {
                     log.warn("incorrect kind {d}", .{@intFromEnum(k)});
@@ -466,54 +485,86 @@ pub const Api = struct {
 
             res catch |err| {
                 log.err("skill issue {}", .{err});
-                wire.send({}, api.socket, .{}) catch {};
+                const ert = @errorReturnTrace();
+                if (ert) |t| {
+                    log.debug("{}", .{t});
+                    const trace = std.fmt.allocPrint(std.heap.c_allocator, "{}", .{t}) catch continue;
+                    api.socket.send(@errorName(err), .{ .sndmore = true }) catch {};
+                    api.socket.send(trace, .{}) catch {};
+                } else {
+                    api.socket.send(@errorName(err), .{}) catch {};
+                }
                 continue;
             };
         }
     }
 
-    fn handleEnqueue(
+    fn handleRemove(
         api: *Api,
-        host_m: *zmq.Message,
-        enqueue: *sqlite.DynamicStatement,
+        fm: []zmq.Message,
+        remove: *sqlite.DynamicStatement,
     ) !void {
-        const r = try wire.recvMP(wire.Range, host_m);
-        const res = enqueue.exec(.{}, .{
+        if (fm.len != 1) return error.InvalidLen;
+        const r = try wire.recvMP(wire.Range, &fm[0]);
+        try remove.exec(.{}, .{
             .prefix = r.prefix.i,
             .msbs = r.msbs,
         });
-        if (res) {
-            try api.socket.send("OK", .{});
-        } else |err| {
-            try api.socket.send(@errorName(err), .{});
-        }
+        try api.socket.send("OK", .{});
     }
 
-    const handleRemove = handleEnqueue;
+    fn handleEnqueue(
+        api: *Api,
+        fm: []zmq.Message,
+        enqueue: *sqlite.DynamicStatement,
+    ) !void {
+        if (fm.len != 2) return error.InvalidLen;
+        const r = try wire.recvMP(wire.Range, &fm[0]);
+        const priority = try wire.recvMP(u8, &fm[1]);
+        try enqueue.exec(.{}, .{
+            .prefix = r.prefix.i,
+            .msbs = r.msbs,
+            .priority = priority,
+        });
+        try api.socket.send("OK", .{});
+    }
 
     fn handleAuthorize(
         api: *Api,
-        key_m: *zmq.Message,
+        fm: []zmq.Message,
         authorize: *sqlite.DynamicStatement,
     ) !void {
-        const key_s = key_m.data();
+        if (fm.len != 1) return error.InvalidLen;
+        const key_s = fm[0].data();
         if (key_s.len != zmq.z85.encodedLen(32) or key_s[key_s.len - 1] != 0) return error.NotKey;
         var buf: [32]u8 = undefined;
         try zmq.z85.decode(&buf, @ptrCast(key_s.ptr));
-        const res = authorize.exec(.{}, .{
-            .public_key = &buf,
+        try authorize.exec(.{}, .{
+            .public_key = sqlite.Blob{ .data = &buf },
         });
-        if (res) {
-            try api.socket.send("OK", .{});
-        } else |err| {
-            try api.socket.send(@errorName(err), .{});
-        }
+        try api.socket.send("OK", .{});
     }
 
     const handleUnauthorize = handleAuthorize;
 
-    const handleExclude = handleEnqueue;
-    const handleUnexclude = handleEnqueue;
+    fn handleExclude(
+        api: *Api,
+        fm: []zmq.Message,
+        enqueue: *sqlite.DynamicStatement,
+    ) !void {
+        if (fm.len < 1 or fm.len > 2) return;
+        const r = try wire.recvMP(wire.Range, &fm[0]);
+        const reason = if (fm.len < 2) "" else fm[1].data();
+        if (!std.unicode.utf8ValidateSlice(reason)) return error.ReasonNotUtf8;
+        try enqueue.exec(.{}, .{
+            .prefix = r.prefix.i,
+            .msbs = r.msbs,
+            .reason = reason,
+        });
+        try api.socket.send("OK", .{});
+    }
+
+    const handleUnexclude = handleRemove;
 };
 
 pub const State = struct {
@@ -606,7 +657,7 @@ pub const State = struct {
                 .write = true,
                 .create = true,
             },
-            .threading_mode = .Serialized,
+            .threading_mode = .Serialized, // FIXME: Actor abstraction + per-thread connection
         });
         errdefer state.db.deinit();
 
@@ -631,6 +682,7 @@ pub const State = struct {
             .{state},
         );
         errdefer state.announce.thread.detach(); // thread will terminate on its own due to error.Terminated
+        try state.announce.thread.setName("announce");
 
         state.api.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
@@ -638,6 +690,7 @@ pub const State = struct {
             .{state},
         );
         errdefer state.api.thread.detach(); // thread will terminate on its own due to error.Terminated
+        try state.api.thread.setName("api");
 
         state.collect.thread = try std.Thread.spawn(
             .{ .stack_size = 1 << 20, .allocator = std.heap.c_allocator },
@@ -645,6 +698,7 @@ pub const State = struct {
             .{state},
         );
         errdefer state.collect.thread.detach(); // thread will terminate on its own due to error.Terminated
+        try state.collect.thread.setName("collect");
     }
 
     pub fn deinit(state: *State) void {

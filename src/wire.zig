@@ -11,15 +11,18 @@ pub fn wireFree(p: ?*anyopaque, _: ?*anyopaque) callconv(.C) void {
 
 /// If `v` is a pointer, `send` takes ownership of it.
 pub fn send(v: anytype, sock: *zmq.Socket, options: zmq.Socket.SendRecvOptions) !void {
+    const log = std.log.scoped(.wire_send);
     const T = @TypeOf(v);
     const ti = @typeInfo(T);
     if (ti == .pointer) {
         std.debug.assert(ti.pointer.size == .One);
         var m = try zmq.Message.initOwned(std.mem.asBytes(v), wireFree, null);
-
+        log.debug("owned \"{s}\"", .{std.fmt.fmtSliceEscapeLower(m.data())});
         try m.send(sock, options);
     } else {
-        try sock.send(&std.mem.toBytes(v), options);
+        const l = &std.mem.toBytes(v);
+        log.debug("copy \"{s}\"", .{std.fmt.fmtSliceEscapeLower(l)});
+        try sock.send(l, options);
     }
 }
 
@@ -47,11 +50,11 @@ pub fn recvM(comptime T: type, m: *zmq.Message) !T {
 }
 
 pub fn recvMP(comptime T: type, m: *zmq.Message) !*T {
-    const d = m.data();
-    if (d.len == @sizeOf(T)) {
+    const len = m.len();
+    if (len == @sizeOf(T)) {
         @branchHint(.likely);
-        return @ptrCast(d.ptr);
-    } else if (d.len < @sizeOf(T)) {
+        return @ptrCast(m.dataPtr());
+    } else if (len < @sizeOf(T)) {
         @branchHint(.unlikely);
         return error.NotEnoughData;
     } else {
@@ -124,11 +127,11 @@ pub const Range = extern struct {
         return r.msbs <= 32;
     }
 
-    pub fn fromString(str: []const u8) error{ IllegalIp, IllegalMask, MissingMask }!Host {
+    pub fn fromString(str: []const u8) error{ IllegalIp, IllegalMask, MissingMask }!Range {
         const slash_idx = std.mem.indexOfScalar(u8, str, '/') orelse return error.MissingMask;
         return .{
-            .ip = try Ip.fromString(str[0..slash_idx]),
-            .port = std.fmt.parseInt(u16, str[slash_idx + 1 ..], 10) catch return error.IllegalMask,
+            .prefix = try Ip.fromString(str[0..slash_idx]),
+            .msbs = std.fmt.parseInt(u8, str[slash_idx + 1 ..], 10) catch return error.IllegalMask,
         };
     }
 
@@ -232,7 +235,7 @@ pub const ApiHeader = extern struct {
         _,
     };
 
-    version: Version,
+    version: Version = .latest,
     kind: Kind,
 };
 

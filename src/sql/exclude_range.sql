@@ -1,1 +1,1 @@
-INSERT INTO excluded VALUES ($prefix, $msbs, $reason);
+INSERT INTO excluded VALUES ($prefix & ~(0xffffffff >> $msbs), $msbs, $reason);

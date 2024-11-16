@@ -12,8 +12,8 @@
             .lazy = true,
         },
         .zlzmq = .{
-            .url = "git+https://github.com/notcancername/zlzmq?ref=master#c3eb4a4217127b129d1d590c8c635542fb3e15fb",
-            .hash = "122052c403acec6de20c86d9a67fa672c62ae479116456cc5c29fbcfd3402aecb22d",
+            .url = "git+https://github.com/notcancername/zlzmq?ref=master#5f6398be98a46a949ef5276ff431c28c01e363a5",
+            .hash = "1220ae1162034431666854e3ab6e29b80effe8044c2c67622ee05963341cedb8e0e5",
         },
     },
 

@@ -222,20 +222,11 @@ pub const ApiHeader = extern struct {
         enqueue_range = 'r',
         remove_range = 'R',
 
-        enqueue_slp = 's',
-        remove_slp = 'S',
+        authorize_public_key = 'p',
+        remove_public_key = 'P',
 
-        enqueue_legacy = 'l',
-        remove_legacy = 'L',
-
-        enqueue_join = 'j',
-        remove_join = 'J',
-
-        enqueue_pubkey = 'p',
-        remove_pubkey = 'P',
-
-        add_exclude = 'e',
-        remove_exclude = 'E',
+        exclude_range = 'e',
+        unexclude_range = 'E',
 
         query = 'q',
         _,

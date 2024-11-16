@@ -7,8 +7,8 @@
             .hash = "12209eab8ab8304a6cbd9bd63285218e5f8ace761139e39147017deb7b9b76b737ea",
         },
         .libzmq = .{
-            .url = "git+https://github.com/notcancername/libzmq?ref=master#dda796c3b2b3aa1bb1589d7a8d0a6a1b394feabf",
-            .hash = "12204b2fa6ce5d91976b6f0ddd8f5b61e86afc2e96a499307fe125e065e7463eb74e",
+            .url = "git+https://github.com/notcancername/libzmq?ref=master#b935143c4418b611ac8380e1a57086465c4b7351",
+            .hash = "122019bb615ce2cad2b58fc0b9663a92adace79e82c77d9eda32d88c171d83cc3453",
             .lazy = true,
         },
         .zlzmq = .{

@@ -189,8 +189,12 @@ CREATE TABLE IF NOT EXISTS ping_players (
     ping_id INT,
     join_id INT,
 
-    FOREIGN KEY (player_uuid) REFERENCES players(id) ON DELETE CASCADE,
+    FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE,
     FOREIGN KEY (ping_id) REFERENCES successful_pings(id) ON DELETE CASCADE,
     FOREIGN KEY (join_id) REFERENCES successful_joins(id) ON DELETE CASCADE,
     CHECK (ping_id NOT NULL OR join_id NOT NULL)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS authorized_public_keys (
+    public_key BLOB UNIQUE CHECK(length(public_key) = 32)
 ) STRICT;
